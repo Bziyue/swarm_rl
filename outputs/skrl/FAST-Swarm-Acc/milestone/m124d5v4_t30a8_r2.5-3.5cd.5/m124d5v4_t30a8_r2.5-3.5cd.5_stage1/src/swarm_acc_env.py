@@ -39,18 +39,18 @@ class SwarmAccEnvCfg(DirectMARLEnvCfg):
     death_penalty_weight = 0.0
     approaching_goal_reward_weight = 25.0
     success_reward_weight = 10.0
-    mutual_collision_penalty_weight = 100.0
+    mutual_collision_penalty_weight = 125.0
     mutual_collision_avoidance_soft_penalty_weight = 0.0
     ang_vel_penalty_weight = 0.0
-    action_norm_penalty_weight = 1.0
-    action_diff_penalty_weight = 1.0
-    action_norm_near_goal_penalty_weight = 0.0
+    action_norm_penalty_weight = 0.5
+    action_diff_penalty_weight = 0.5
+    action_norm_near_goal_penalty_weight = 10.0
     # Exponential decay factors and tolerances
     mutual_collision_avoidance_reward_scale = 1.0
 
     # Mission settings
     mission_names = ["migration", "crossover", "crossover_v1", "chaotic", "cluster_swap"]
-    mission_prob = [0.0, 0.25, 0.05, 0.0, 0.7]
+    mission_prob = [0.0, 0.1, 0.3, 0.0, 0.6]
     # mission_prob = [1.0, 0.0, 0.0, 0.0, 0.0]
     # mission_prob = [0.0, 1.0, 0.0, 0.0, 0.0]
     # mission_prob = [0.0, 0.0, 1.0, 0.0, 0.0]
@@ -77,8 +77,8 @@ class SwarmAccEnvCfg(DirectMARLEnvCfg):
     realistic_ctrl = True
     torque_ctrl_delay_ms = 20.0  # Angular velocity controller delay of PX4-Autopilot: 30 ~ 50ms
     # Observation parameters
-    odom_delay_ms = 40.0  # VIO delay: 5 ~ 20ms with imu propogation
-    rel_pos_obs_delay_ms = 250.0  # Seeker Omni-4P streaming delay: 160ms + YOLO delay: 40ms
+    odom_delay_ms = 20.0  # VIO delay: 5 ~ 20ms with imu propogation
+    rel_pos_obs_delay_ms = 200.0  # Seeker Omni-4P streaming delay: 160ms + YOLO delay: 40ms
     max_visible_distance = 5.0
     # Maximum field of view of camera in tilt direction (deg)
     # yaw0: rel_pos_xy aligned with body x/y axes; yaw45: aligned with diagonals
@@ -88,10 +88,10 @@ class SwarmAccEnvCfg(DirectMARLEnvCfg):
     enable_domain_randomization = True
     odom_lin_vel_noise_std = 0.1
     odom_rot_noise_std = 0.0
-    min_dist_noise_std = 0.13
+    min_dist_noise_std = 0.05
     max_dist_noise_std = 1.0
     min_bearing_noise_std = 0.1
-    max_bearing_noise_std = 0.15
+    max_bearing_noise_std = 0.1
     drop_prob = 0.05
 
     # Parameters for environment and agents
@@ -107,7 +107,6 @@ class SwarmAccEnvCfg(DirectMARLEnvCfg):
     gui_render_freq = 50
     render_decimation = max(1, math.floor(physics_freq / gui_render_freq))
     clip_action = 1.0
-    tanh_action = False
     history_length = 6
     self_observation_dim = 10
     relative_observation_dim = 4
@@ -117,8 +116,8 @@ class SwarmAccEnvCfg(DirectMARLEnvCfg):
     state_space = transient_state_dim
     possible_agents = [f"drone_{i}" for i in range(num_drones)]
     action_spaces = {agent: 2 for agent in possible_agents}
-    a_max = {agent: 10.0 for agent in possible_agents}
-    v_max = {agent: 5.0 for agent in possible_agents}
+    a_max = {agent: 8.0 for agent in possible_agents}
+    v_max = {agent: 4.0 for agent in possible_agents}
 
     def __post_init__(self):
         self.observation_spaces = {agent: self.history_length * self.transient_observasion_dim for agent in self.possible_agents}
@@ -253,11 +252,11 @@ class SwarmAccEnv(DirectMARLEnv):
         self.control_counter = 0
 
         # Delay for torque control
-        self.torque_delay_lag = 0 if self.cfg.torque_ctrl_delay_ms <= 0.0 else int(math.ceil(self.cfg.torque_ctrl_delay_ms * 1e-3 / self.physics_dt))
-        logger.info(f"Torque control delay = {self.torque_delay_lag} physics steps")
+        self.torque_delay_max_lag = 0 if self.cfg.torque_ctrl_delay_ms <= 0.0 else int(math.ceil(self.cfg.torque_ctrl_delay_ms * 1e-3 / self.physics_dt))
+        logger.info(f"Max torque control delay = {self.torque_delay_max_lag} physics steps")
         self.thrust_delay = {
             agent: DelayBuffer(
-                history_length=self.torque_delay_lag,
+                history_length=self.torque_delay_max_lag,
                 batch_size=self.num_envs,
                 device=self.device,
             )
@@ -265,15 +264,12 @@ class SwarmAccEnv(DirectMARLEnv):
         }
         self.m_delay = {
             agent: DelayBuffer(
-                history_length=self.torque_delay_lag,
+                history_length=self.torque_delay_max_lag,
                 batch_size=self.num_envs,
                 device=self.device,
             )
             for agent in self.cfg.possible_agents
         }
-        for agent in self.cfg.possible_agents:
-            self.thrust_delay[agent].set_time_lag(self.torque_delay_lag)
-            self.m_delay[agent].set_time_lag(self.torque_delay_lag)
 
         self.relative_positions_w = {
             i: {j: torch.zeros(self.num_envs, 3, device=self.device) for j in range(self.cfg.num_drones) if j != i} for i in range(self.cfg.num_drones)
@@ -372,10 +368,7 @@ class SwarmAccEnv(DirectMARLEnv):
             a_desired_o = torch.zeros(self.num_envs, 3, device=self.device)
 
             # Denormalize and clip the input signal
-            if self.cfg.tanh_action:
-                self.actions[agent] = torch.tanh(actions[agent] / self.cfg.clip_action)
-            else:
-                self.actions[agent] = actions[agent].clamp(-self.cfg.clip_action, self.cfg.clip_action) / self.cfg.clip_action
+            self.actions[agent] = actions[agent].clone().clamp(-self.cfg.clip_action, self.cfg.clip_action) / self.cfg.clip_action
             a_xy_desired = self.actions[agent] * self.cfg.a_max[agent]
             norm_xy = torch.linalg.norm(a_xy_desired, dim=1, keepdim=True)
             clip_scale = torch.clamp(norm_xy / self.cfg.a_max[agent], min=1.0)
@@ -1063,6 +1056,20 @@ class SwarmAccEnv(DirectMARLEnv):
                 self.thrust_delay[agent].reset(env_ids)
                 self.m_delay[agent].reset(env_ids)
 
+                if self.torque_delay_max_lag > 0:
+                    rand_lags = torch.randint(
+                        # low=math.floor(0.5 * self.torque_delay_max_lag),
+                        low=self.torque_delay_max_lag,
+                        high=self.torque_delay_max_lag + 1,
+                        size=(len(env_ids),),
+                        dtype=torch.int,
+                        device=self.device,
+                    )
+                else:
+                    rand_lags = torch.zeros(len(env_ids), dtype=torch.int, device=self.device)
+                self.thrust_delay[agent].set_time_lag(rand_lags, batch_ids=env_ids)
+                self.m_delay[agent].set_time_lag(rand_lags, batch_ids=env_ids)
+
             self.odom_delay[agent].reset(env_ids)
             self.rel_pos_delay[agent].reset(env_ids)
 
@@ -1079,7 +1086,7 @@ class SwarmAccEnv(DirectMARLEnv):
 
             if self.rel_pos_max_lag > 0:
                 rand_lags = torch.randint(
-                    low=math.floor(0.6 * self.rel_pos_max_lag),
+                    low=math.floor(0.5 * self.rel_pos_max_lag),
                     high=self.rel_pos_max_lag + 1,
                     size=(len(env_ids),),
                     dtype=torch.int,
