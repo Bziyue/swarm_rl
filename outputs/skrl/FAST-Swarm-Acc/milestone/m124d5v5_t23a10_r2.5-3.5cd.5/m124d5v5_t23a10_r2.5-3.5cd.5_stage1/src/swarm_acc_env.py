@@ -117,7 +117,7 @@ class SwarmAccEnvCfg(DirectMARLEnvCfg):
     state_space = transient_state_dim
     possible_agents = [f"drone_{i}" for i in range(num_drones)]
     action_spaces = {agent: 2 for agent in possible_agents}
-    a_max = {agent: 8.0 for agent in possible_agents}
+    a_max = {agent: 10.0 for agent in possible_agents}
     v_max = {agent: 5.0 for agent in possible_agents}
 
     def __post_init__(self):

@@ -21,8 +21,8 @@ models:
     network:
       - name: net
         input: STATES
-        # layers: [128, 128, 64, 32]
-        layers: [256, 256, 128, 64]
+        layers: [128, 128, 64, 32]
+        # layers: [256, 256, 128, 64]
         # layers: [1024, 512, 256, 128]
         activations: elu
     output: ACTIONS
@@ -32,8 +32,8 @@ models:
     network:
       - name: net
         input: STATES
-        # layers: [128, 128, 64, 32]
-        layers: [256, 256, 128, 64]
+        layers: [128, 128, 64, 32]
+        # layers: [256, 256, 128, 64]
         # layers: [1024, 512, 256, 128]
         activations: elu
     output: ONE
@@ -71,7 +71,7 @@ agent:
   ratio_clip: 0.2
   value_clip: 0.2
   clip_predicted_values: True
-  entropy_loss_scale: 0.0005
+  entropy_loss_scale: 0.0001
   value_loss_scale: 1.0
   kl_threshold: 0.1
   rewards_shaper_scale: 1.0

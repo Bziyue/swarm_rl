@@ -39,11 +39,11 @@ class SwarmAccEnvCfg(DirectMARLEnvCfg):
     death_penalty_weight = 0.0
     approaching_goal_reward_weight = 25.0
     success_reward_weight = 10.0
-    mutual_collision_penalty_weight = 125.0
+    mutual_collision_penalty_weight = 100.0
     mutual_collision_avoidance_soft_penalty_weight = 0.0
     ang_vel_penalty_weight = 0.0
     action_norm_penalty_weight = 1.0
-    action_diff_penalty_weight = 1.0
+    action_diff_penalty_weight = 1.5
     action_norm_near_goal_penalty_weight = 0.0
     # Exponential decay factors and tolerances
     mutual_collision_avoidance_reward_scale = 1.0
@@ -60,10 +60,10 @@ class SwarmAccEnvCfg(DirectMARLEnvCfg):
     flight_range_margin = 1.5
     fix_range = False
     flight_altitude = 1.0  # Desired flight altitude
-    collide_dist = 0.5
+    collide_dist = 0.66
     soft_collision_penalty_dist = 1.0
     success_distance_threshold = 0.25  # Distance threshold for considering goal reached
-    goal_reset_time_range = (1.0, 2.0)  # Delay for resetting goal after reaching it
+    goal_reset_time_range = (1.0, 3.0)  # Delay for resetting goal after reaching it
     max_sampling_tries = 100  # Maximum number of attempts to sample a valid initial state or goal
     # Params for mission migration
     use_custom_traj = True  # Whether to use custom trajectory for migration mission
