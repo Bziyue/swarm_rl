@@ -1,12 +1,15 @@
-[submodule "reinforcement_learning/lib/skrl"]
-	path = reinforcement_learning/lib/skrl
-	url = git@github.com:dungloi/skrl.git
-[submodule "reinforcement_learning/lib/stable-baselines3"]
-	path = reinforcement_learning/lib/stable-baselines3
-	url = git@github.com:lyf-FATAS/stable-baselines3.git
-[submodule "envs/lib/IsaacLab"]
-	path = envs/lib/IsaacLab
+[submodule "lib/IsaacLab"]
+	path = lib/IsaacLab
 	url = git@github.com:lyf-FATAS/IsaacLab.git
-[submodule "reinforcement_learning/lib/rsl_rl"]
-	path = reinforcement_learning/lib/rsl_rl
+
+[submodule "lib/rsl_rl"]
+	path = lib/rsl_rl
 	url = git@github.com:lyf-FATAS/rsl_rl.git
+
+[submodule "lib/skrl"]
+	path = lib/skrl
+	url = git@github.com:dungloi/skrl.git
+
+[submodule "lib/stable-baselines3"]
+	path = lib/stable-baselines3
+	url = git@github.com:lyf-FATAS/stable-baselines3.git

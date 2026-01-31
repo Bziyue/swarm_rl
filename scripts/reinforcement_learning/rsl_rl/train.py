@@ -110,7 +110,8 @@ from isaaclab.utils.io import dump_yaml
 from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlVecEnvWrapper
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
-from envs import camera_waypoint_env, quadcopter_bodyrate_env, quadcopter_waypoint_env, swarm_bodyrate_env, swarm_acc_env, swarm_vel_env, swarm_waypoint_env
+# from envs import camera_waypoint_env, quadcopter_bodyrate_env, quadcopter_waypoint_env, swarm_bodyrate_env, swarm_acc_env, swarm_vel_env, swarm_waypoint_env
+import envs  # noqa: F401
 
 # PLACEHOLDER: Extension template (do not remove this comment)
 
