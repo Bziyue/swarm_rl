@@ -57,19 +57,7 @@ if args_cli.task is None:
     raise ValueError("The task argument is required and cannot be None.")
 elif args_cli.task in ["FAST-RGB-Waypoint", "FAST-Depth-Waypoint"]:
     args_cli.enable_cameras = True
-elif args_cli.task not in [
-    "FAST-Quadcopter-Bodyrate",
-    "FAST-Quadcopter-Vel",
-    "FAST-Quadcopter-Waypoint",
-    "FAST-Swarm-Bodyrate",
-    "FAST-Swarm-Acc",
-    "FAST-Swarm-AJ",
-    "FAST-Swarm-Vel",
-    "FAST-Swarm-Waypoint",
-]:
-    raise ValueError(
-        "Invalid task name #^# Please select from: FAST-Quadcopter-Bodyrate; FAST-Quadcopter-Vel; FAST-Quadcopter-Waypoint; FAST-RGB-Waypoint; FAST-Depth-Waypoint; FAST-Swarm-Bodyrate; FAST-Swarm-Acc; FAST-Swarm-AJ; FAST-Swarm-Vel; FAST-Swarm-Waypoint."
-    )
+
 if args_cli.video:
     args_cli.enable_cameras = True
 
@@ -78,9 +66,6 @@ app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
 """Rest everything follows."""
-
-# TODO: Improve import modality
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
 
 import gymnasium as gym
 from loguru import logger
@@ -107,7 +92,9 @@ from isaaclab.envs import DirectMARLEnv, multi_agent_to_single_agent
 from isaaclab_rl.skrl import SkrlVecEnvWrapper
 from isaaclab_tasks.utils import get_checkpoint_path, load_cfg_from_registry, parse_env_cfg
 
-from envs import camera_waypoint_env, quadcopter_bodyrate_env, quadcopter_waypoint_env, swarm_bodyrate_env, swarm_acc_env, swarm_aj_env, swarm_vel_env, swarm_waypoint_env
+import swarm_rl.envs  # noqa: F401
+
+
 
 # Config shortcuts
 algorithm = args_cli.algorithm.lower()

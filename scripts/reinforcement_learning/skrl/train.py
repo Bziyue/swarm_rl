@@ -49,19 +49,7 @@ if args_cli.task is None:
     raise ValueError("The task argument is required and cannot be None.")
 elif args_cli.task in ["FAST-RGB-Waypoint", "FAST-Depth-Waypoint"]:
     args_cli.enable_cameras = True
-# elif args_cli.task not in [
-#     "FAST-Quadcopter-Bodyrate",
-#     "FAST-Quadcopter-Vel",
-#     "FAST-Quadcopter-Waypoint",
-#     "FAST-Swarm-Bodyrate",
-#     "FAST-Swarm-Acc",
-#     "FAST-Swarm-AJ",
-#     "FAST-Swarm-Vel",
-#     "FAST-Swarm-Waypoint",
-# ]:
-#     raise ValueError(
-#         "Invalid task name #^# Please select from: FAST-Quadcopter-Bodyrate; FAST-Quadcopter-Vel; FAST-Quadcopter-Waypoint; FAST-RGB-Waypoint; FAST-Depth-Waypoint; FAST-Swarm-Bodyrate; FAST-Swarm-Acc; FAST-Swarm-AJ; FAST-Swarm-Vel; FAST-Swarm-Waypoint."
-#     )
+
 if args_cli.video:
     args_cli.enable_cameras = True
 # Clear out sys.argv for Hydra
@@ -71,11 +59,7 @@ sys.argv = [sys.argv[0]] + hydra_args
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
-
 """Rest everything follows."""
-
-# TODO: Improve import modality
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
 
 from datetime import datetime
 import gymnasium as gym
@@ -93,6 +77,7 @@ SKRL_VERSION = "1.4.2"
 if version.parse(skrl.__version__) < version.parse(SKRL_VERSION):
     skrl.logger.error(f"Unsupported skrl version: {skrl.__version__}. " f"Install supported version using 'pip install skrl>={SKRL_VERSION}'")
     exit()
+
 if args_cli.ml_framework.startswith("torch"):
     from skrl.utils.runner.torch import Runner
 elif args_cli.ml_framework.startswith("jax"):
@@ -108,7 +93,6 @@ import swarm_rl.envs  # noqa: F401
 
 
 import importlib.util
-import shutil
 from pathlib import Path
 
 def copy_env_source(env_cfg, dump_dir: str) -> None:
@@ -153,6 +137,7 @@ def main(env_cfg: DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: dict):
     if args_cli.distributed:
         env_cfg.sim.device = f"cuda:{app_launcher.local_rank}"
     agent_cfg["trainer"]["close_environment_at_exit"] = False
+    
     # Configure the ML framework into the global skrl variable
     if args_cli.ml_framework.startswith("jax"):
         skrl.config.jax.backend = "jax" if args_cli.ml_framework == "jax" else "numpy"
