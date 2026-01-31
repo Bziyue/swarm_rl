@@ -26,9 +26,11 @@ from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim import SimulationCfg
 from isaaclab.utils import configclass
 
+from importlib.resources import files
+
 
 @configclass
-class TestExternalEnvCfg(DirectRLEnvCfg):
+class SingleBodyrateEnvCfg(DirectRLEnvCfg):
     # env
     decimation = 2
     episode_length_s = 5.0
@@ -62,12 +64,16 @@ class TestExternalEnvCfg(DirectRLEnvCfg):
     initial_pole_angle_range = [-0.25, 0.25]  # pole angle sample range on reset [rad]
     max_cart_pos = 3.0  # reset if cart exceeds this position [m]
 
+    ground: GroundPlaneCfg = GroundPlaneCfg(
+        usd_path=str(files("swarm_rl").joinpath("assets/flat_plane/flat_plane.usd"))
+    )
 
 
-class TestExternalEnv(DirectRLEnv):
-    cfg: TestExternalEnvCfg
 
-    def __init__(self, cfg: TestExternalEnvCfg, render_mode: str | None = None, **kwargs):
+class SingleBodyrateEnv(DirectRLEnv):
+    cfg: SingleBodyrateEnvCfg
+
+    def __init__(self, cfg: SingleBodyrateEnvCfg, render_mode: str | None = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
 
         self._cart_dof_idx, _ = self.robot.find_joints(self.cfg.cart_dof_name)
@@ -79,7 +85,7 @@ class TestExternalEnv(DirectRLEnv):
     def _setup_scene(self):
         self.robot = Articulation(self.cfg.robot_cfg)
         # add ground plane
-        spawn_ground_plane(prim_path="/World/ground", cfg=GroundPlaneCfg())
+        spawn_ground_plane(prim_path="/World/ground", cfg=self.cfg.ground)
         # clone and replicate
         self.scene.clone_environments(copy_from_source=False)
         # add articulation to scene

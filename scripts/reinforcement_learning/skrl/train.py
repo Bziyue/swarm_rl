@@ -49,19 +49,19 @@ if args_cli.task is None:
     raise ValueError("The task argument is required and cannot be None.")
 elif args_cli.task in ["FAST-RGB-Waypoint", "FAST-Depth-Waypoint"]:
     args_cli.enable_cameras = True
-elif args_cli.task not in [
-    "FAST-Quadcopter-Bodyrate",
-    "FAST-Quadcopter-Vel",
-    "FAST-Quadcopter-Waypoint",
-    "FAST-Swarm-Bodyrate",
-    "FAST-Swarm-Acc",
-    "FAST-Swarm-AJ",
-    "FAST-Swarm-Vel",
-    "FAST-Swarm-Waypoint",
-]:
-    raise ValueError(
-        "Invalid task name #^# Please select from: FAST-Quadcopter-Bodyrate; FAST-Quadcopter-Vel; FAST-Quadcopter-Waypoint; FAST-RGB-Waypoint; FAST-Depth-Waypoint; FAST-Swarm-Bodyrate; FAST-Swarm-Acc; FAST-Swarm-AJ; FAST-Swarm-Vel; FAST-Swarm-Waypoint."
-    )
+# elif args_cli.task not in [
+#     "FAST-Quadcopter-Bodyrate",
+#     "FAST-Quadcopter-Vel",
+#     "FAST-Quadcopter-Waypoint",
+#     "FAST-Swarm-Bodyrate",
+#     "FAST-Swarm-Acc",
+#     "FAST-Swarm-AJ",
+#     "FAST-Swarm-Vel",
+#     "FAST-Swarm-Waypoint",
+# ]:
+#     raise ValueError(
+#         "Invalid task name #^# Please select from: FAST-Quadcopter-Bodyrate; FAST-Quadcopter-Vel; FAST-Quadcopter-Waypoint; FAST-RGB-Waypoint; FAST-Depth-Waypoint; FAST-Swarm-Bodyrate; FAST-Swarm-Acc; FAST-Swarm-AJ; FAST-Swarm-Vel; FAST-Swarm-Waypoint."
+#     )
 if args_cli.video:
     args_cli.enable_cameras = True
 # Clear out sys.argv for Hydra
@@ -104,11 +104,33 @@ from isaaclab.utils.io import dump_yaml
 from isaaclab_rl.skrl import SkrlVecEnvWrapper
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
-from envs import camera_waypoint_env, quadcopter_bodyrate_env, quadcopter_waypoint_env, swarm_bodyrate_env, swarm_acc_env, swarm_aj_env, swarm_vel_env, swarm_waypoint_env
+import swarm_rl.envs  # noqa: F401
+
+
+import importlib.util
+import shutil
+from pathlib import Path
+
+def copy_env_source(env_cfg, dump_dir: str) -> None:
+    dump_dir = Path(dump_dir)
+    dump_dir.mkdir(parents=True, exist_ok=True)
+
+    # env_cfg 是 SingleBodyrateEnvCfg 的实例
+    module_name = env_cfg.__class__.__module__  # 'swarm_rl.envs.single.single_bodyrate_env'
+    spec = importlib.util.find_spec(module_name)
+    if spec is None or spec.origin is None:
+        raise RuntimeError(f"Cannot locate source for module: {module_name}")
+    else:
+        print(f"Located source for module {module_name} at: {spec.origin}")
+
+    src_path = Path(spec.origin)
+    shutil.copy2(src_path, dump_dir / src_path.name)
+
+
 
 # Config shortcuts
 algorithm = args_cli.algorithm.lower()
-agent_cfg_entry_point = "skrl_ppo_cfg_entry_point" if algorithm in ["ppo"] else f"skrl_{algorithm}_cfg_entry_point"
+agent_cfg_entry_point = f"skrl_{algorithm}_cfg_entry_point"
 
 
 @hydra_task_config(args_cli.task, agent_cfg_entry_point)
@@ -159,29 +181,8 @@ def main(env_cfg: DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: dict):
     dump_yaml(os.path.join(log_dir, "params", "agent.yaml"), agent_cfg)
     os.chmod(os.path.join(log_dir, "params", "agent.yaml"), 0o444)
 
-    env_dir = os.path.join(os.path.dirname(__file__), "../../", "envs")
     dump_env_src_dir = os.path.join(log_dir, "src")
-    os.makedirs(dump_env_src_dir, exist_ok=True)
-    if args_cli.task == "FAST-Quadcopter-Bodyrate":
-        env_src_file = "quadcopter_bodyrate_env.py"
-    elif args_cli.task == "FAST-Quadcopter-Vel":
-        env_src_file = "quadcopter_vel_env.py"
-    elif args_cli.task == "FAST-Quadcopter-Waypoint":
-        env_src_file = "quadcopter_waypoint_env.py"
-    elif args_cli.task in ["FAST-RGB-Waypoint", "FAST-Depth-Waypoint"]:
-        env_src_file = "camera_waypoint_env.py"
-    elif args_cli.task == "FAST-Swarm-Bodyrate":
-        env_src_file = "swarm_bodyrate_env.py"
-    elif args_cli.task == "FAST-Swarm-Acc":
-        env_src_file = "swarm_acc_env.py"
-    elif args_cli.task == "FAST-Swarm-AJ":
-        env_src_file = "swarm_aj_env.py"
-    elif args_cli.task == "FAST-Swarm-Vel":
-        env_src_file = "swarm_vel_env.py"
-    elif args_cli.task == "FAST-Swarm-Waypoint":
-        env_src_file = "swarm_waypoint_env.py"
-    shutil.copy2(os.path.join(env_dir, env_src_file), os.path.join(dump_env_src_dir, env_src_file))
-    os.chmod(os.path.join(dump_env_src_dir, env_src_file), 0o444)
+    copy_env_source(env_cfg, dump_env_src_dir)
 
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
 

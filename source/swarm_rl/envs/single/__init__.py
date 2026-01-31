@@ -13,12 +13,12 @@ from . import agents
 
 
 gym.register(
-    id="Fast-Single-Bodyrate",
-    entry_point=f"{__name__}.single_bodyrate_env:TestExternalEnv",
+    id="FAST-Single-Bodyrate",
+    entry_point=f"{__name__}.single_bodyrate_env:SingleBodyrateEnv",
     disable_env_checker=True,
     kwargs={
-        "env_cfg_entry_point": f"{__name__}.single_bodyrate_env:TestExternalEnvCfg",
+        "env_cfg_entry_point": f"{__name__}.single_bodyrate_env:SingleBodyrateEnvCfg",
 
-        "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg.yaml",
+        "skrl_ppo_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg.yaml",
     },
 )
