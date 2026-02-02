@@ -359,24 +359,128 @@ def compute_limited_angular_acc(candidate_bodyrate: torch.Tensor, w_last: torch.
     return bodyrate_out
 
 
+# @torch.jit.script
+# def bodyrate_control_without_thrust(
+#     w_odom: torch.Tensor,
+#     w_desired: torch.Tensor,
+#     inertia: torch.Tensor,
+#     kPw: torch.Tensor,
+# ) -> torch.Tensor:
+
+#     I = inertia.view(3, 3)
+#     I_w_odom = torch.matmul(I, w_odom.transpose(0, 1))
+#     feedforward = torch.stack(
+#         [
+#             w_odom[:, 1] * I_w_odom[2, :] - w_odom[:, 2] * I_w_odom[1, :],
+#             w_odom[:, 2] * I_w_odom[0, :] - w_odom[:, 0] * I_w_odom[2, :],
+#             w_odom[:, 0] * I_w_odom[1, :] - w_odom[:, 1] * I_w_odom[0, :],
+#         ],
+#         dim=1,
+#     )
+#     # TODO: 确定补偿项是否需要乘惯量矩阵以确保三轴闭环等效带宽一致
+#     torque_desired = feedforward + kPw * (w_desired - w_odom)
+
+#     return torque_desired
+
+
 @torch.jit.script
 def bodyrate_control_without_thrust(
-    w_odom: torch.Tensor,
-    w_desired: torch.Tensor,
-    inertia: torch.Tensor,
-    kPw: torch.Tensor,
+    w_odom: torch.Tensor,      # (N, 3) 当前角速度（建议：机体系/惯量定义一致的坐标系）
+    w_desired: torch.Tensor,   # (N, 3) 目标角速度（同上坐标系）
+    inertia: torch.Tensor,     # (N, 3, 3) or (N, 9) or (3, 3) or (9,)
+    kPw: torch.Tensor,         # 标量 or (3,) or (N, 3)；作为角速度误差的比例增益
 ) -> torch.Tensor:
+    """
+    Body-rate P controller (no thrust), with gyroscopic compensation.
 
-    I = inertia.view(3, 3)
-    I_w_odom = torch.matmul(I, w_odom.transpose(0, 1))
-    feedforward = torch.stack(
-        [
-            w_odom[:, 1] * I_w_odom[2, :] - w_odom[:, 2] * I_w_odom[1, :],
-            w_odom[:, 2] * I_w_odom[0, :] - w_odom[:, 0] * I_w_odom[2, :],
-            w_odom[:, 0] * I_w_odom[1, :] - w_odom[:, 1] * I_w_odom[0, :],
-        ],
-        dim=1,
-    )
-    torque_desired = feedforward + kPw * (w_desired - w_odom)
+    Computes desired body torque:
+        τ = ω × (I ω) + I ( Kp ⊙ (ω_des - ω) )
 
+    where:
+      - ω, ω_des are angular rates expressed in a frame consistent with I
+        (typically body frame if I is body inertia).
+      - I is the inertia matrix per environment (or shared).
+      - Kp is per-axis proportional gain (scalar / 3-vector / per-env 3-vector).
+      - '⊙' is element-wise multiply (diagonal gain), i.e., diag(Kp) * error.
+
+    Shapes:
+      w_odom, w_desired: (N, 3)
+      inertia:
+        - (N, 3, 3): per-env inertia matrices
+        - (N, 9):    per-env flattened inertia matrices (row-major)
+        - (3, 3):    shared inertia matrix for all envs
+        - (9,):      shared flattened inertia (row-major)
+      kPw:
+        - scalar: shared gain for all axes/envs
+        - (3,):  shared per-axis gains
+        - (N, 3): per-env per-axis gains
+
+    Returns:
+      torque_desired: (N, 3)
+    """
+
+    # ------------------------------------------------------------
+    # 0) basic size
+    # ------------------------------------------------------------
+    N = w_odom.size(0)
+
+    # ------------------------------------------------------------
+    # 1) reshape/expand inertia to (N, 3, 3)
+    #    - disambiguate (3,3) vs (N,9) which are both dim==2 cases
+    # ------------------------------------------------------------
+    if inertia.dim() == 3:
+        # (N,3,3) or (1,3,3)
+        if inertia.size(0) == 1 and N > 1:
+            I = inertia.expand(N, 3, 3)
+        else:
+            I = inertia
+    elif inertia.dim() == 2:
+        # either (3,3) shared, or (N,9) flattened per-env
+        if inertia.size(0) == 3 and inertia.size(1) == 3:
+            I = inertia.unsqueeze(0).expand(N, 3, 3)
+        else:
+            # assume (N,9)
+            torch._assert(inertia.size(0) == N, "inertia (dim=2) must be (3,3) or (N,9)")
+            torch._assert(inertia.size(1) == 9, "inertia (dim=2) must be (3,3) or (N,9)")
+            I = inertia.view(N, 3, 3)
+    else:
+        # allow (9,) shared flattened
+        torch._assert(inertia.numel() == 9, "inertia must be (N,3,3), (N,9), (3,3), or (9,)")
+        I = inertia.view(1, 3, 3).expand(N, 3, 3)
+
+    # ------------------------------------------------------------
+    # 2) compute I*omega for each env: (N,3,3) x (N,3,1) -> (N,3)
+    # ------------------------------------------------------------
+    Iw = torch.bmm(I, w_odom.unsqueeze(-1)).squeeze(-1)  # (N, 3)
+
+    # ------------------------------------------------------------
+    # 3) gyroscopic term: omega x (I*omega)
+    #    This compensates rigid-body rotational coupling.
+    # ------------------------------------------------------------
+    feedforward = torch.cross(w_odom, Iw, dim=1)         # (N, 3)
+
+    # ------------------------------------------------------------
+    # 4) broadcast kPw to (N,3)
+    # ------------------------------------------------------------
+    if kPw.numel() == 1:
+        kPw_b = kPw.expand_as(w_odom)
+    elif kPw.dim() == 1:
+        torch._assert(kPw.numel() == 3, "kPw (dim=1) must be (3,)")
+        kPw_b = kPw.view(1, 3).expand_as(w_odom)
+    else:
+        # assume already (N,3)
+        torch._assert(kPw.size(0) == N and kPw.size(1) == 3, "kPw must be scalar, (3,), or (N,3)")
+        kPw_b = kPw
+
+    # ------------------------------------------------------------
+    # 5) proportional feedback on body-rate error
+    #    a_des = Kp ⊙ (w_des - w)        -> (N,3)
+    #    τ_fb  = I * a_des               -> (N,3)
+    # ------------------------------------------------------------
+    w_err = (w_desired - w_odom)                 # (N, 3)
+    a_des = kPw_b * w_err                        # (N, 3) desired angular accel (diag gain)
+    torque_fb = torch.bmm(I, a_des.unsqueeze(-1)).squeeze(-1)  # (N, 3)
+
+    # Total desired torque (excluding thrust)
+    torque_desired = feedforward + torque_fb     # (N, 3)
     return torque_desired
