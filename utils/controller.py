@@ -20,7 +20,7 @@ class Controller:
         self.w_error_prev = torch.zeros(num_envs, 3, device=gravity.device)
 
         self.K_min_norm_collec_acc = 3
-        self.K_max_ang = 25
+        self.K_max_ang = 23
         self.K_max_bodyrates_feedback = 13
         self.K_max_angular_acc = 200
 

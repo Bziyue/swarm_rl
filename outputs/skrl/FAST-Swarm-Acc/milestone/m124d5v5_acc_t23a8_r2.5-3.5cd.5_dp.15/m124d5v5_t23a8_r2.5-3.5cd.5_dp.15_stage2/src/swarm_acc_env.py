@@ -57,7 +57,7 @@ class SwarmAccEnvCfg(DirectMARLEnvCfg):
     # mission_prob = [0.0, 0.0, 0.0, 1.0, 0.0]
     # mission_prob = [0.0, 0.0, 0.0, 0.0, 1.0]
     flight_range = 5.0
-    sampling_range_margin = 1.5
+    flight_range_margin = 1.5
     fix_range = False
     flight_altitude = 1.0  # Desired flight altitude
     collide_dist = 0.5
@@ -570,35 +570,29 @@ class SwarmAccEnv(DirectMARLEnv):
                 torch.zeros(self.num_envs, device=self.device),
             )
 
-            components = [
-                ("meaning_to_live", self.cfg.to_live_reward_weight, torch.ones(self.num_envs, device=self.device) * self.step_dt),
-                ("approaching_goal", self.cfg.approaching_goal_reward_weight, approaching_goal_reward * self.step_dt),
-                ("success", self.cfg.success_reward_weight, success_reward * self.step_dt),
-                ("death_penalty", self.cfg.death_penalty_weight, death_reward),
-                ("mutual_collision_penalty", self.cfg.mutual_collision_penalty_weight, mutual_collision_reward * self.step_dt),
-                (
-                    "mutual_collision_avoidance_soft_penalty",
-                    self.cfg.mutual_collision_avoidance_soft_penalty_weight,
-                    mutual_collision_avoidance_soft_reward * self.step_dt,
-                ),
-                ("ang_vel_penalty", self.cfg.ang_vel_penalty_weight, ang_vel_reward * self.step_dt),
-                ("action_norm_penalty", self.cfg.action_norm_penalty_weight, action_norm_reward * self.step_dt),
-                ("action_diff_penalty", self.cfg.action_diff_penalty_weight, action_diff_reward * self.step_dt),
-                ("action_norm_near_goal_penalty", self.cfg.action_norm_near_goal_penalty_weight, action_norm_near_goal_reward * self.step_dt),
-            ]
-            reward_components = {name: value * weight for name, weight, value in components if weight != 0.0}
+            reward = {
+                "meaning_to_live": torch.ones(self.num_envs, device=self.device) * self.cfg.to_live_reward_weight * self.step_dt,
+                "approaching_goal": approaching_goal_reward * self.cfg.approaching_goal_reward_weight * self.step_dt,
+                "success": success_reward * self.cfg.success_reward_weight * self.step_dt,
+                "death_penalty": death_reward * self.cfg.death_penalty_weight,
+                "mutual_collision_penalty": mutual_collision_reward * self.cfg.mutual_collision_penalty_weight * self.step_dt,
+                "mutual_collision_avoidance_soft_penalty": mutual_collision_avoidance_soft_reward
+                * self.cfg.mutual_collision_avoidance_soft_penalty_weight
+                * self.step_dt,
+                "ang_vel_penalty": ang_vel_reward * self.cfg.ang_vel_penalty_weight * self.step_dt,
+                "action_norm_penalty": action_norm_reward * self.cfg.action_norm_penalty_weight * self.step_dt,
+                "action_diff_penalty": action_diff_reward * self.cfg.action_diff_penalty_weight * self.step_dt,
+                "action_norm_near_goal_penalty": action_norm_near_goal_reward * self.cfg.action_norm_near_goal_penalty_weight * self.step_dt,
+            }
 
             # Logging
-            for key, value in reward_components.items():
+            for key, value in reward.items():
                 if key in self.episode_sums:
                     self.episode_sums[key] += value / self.cfg.num_drones
                 else:
                     self.episode_sums[key] = value / self.cfg.num_drones
 
-            if reward_components:
-                reward = torch.sum(torch.stack(list(reward_components.values())), dim=0)
-            else:
-                reward = torch.zeros(self.num_envs, device=self.device)
+            reward = torch.sum(torch.stack(list(reward.values())), dim=0)
 
             rewards[agent] = reward
         return rewards
@@ -642,7 +636,7 @@ class SwarmAccEnv(DirectMARLEnv):
         start = time.perf_counter()
         # The migration mission: huddled init states + unified random target
         if len(mission_0_ids) > 0:
-            rg = self.cfg.flight_range - self.success_dist_thr[mission_0_ids][0] - self.cfg.sampling_range_margin
+            rg = self.cfg.flight_range - self.success_dist_thr[mission_0_ids][0] - self.cfg.flight_range_margin
 
             if self.cfg.use_custom_traj:
                 # Randomly select a trajectory from the library
@@ -717,7 +711,7 @@ class SwarmAccEnv(DirectMARLEnv):
 
         # The crossover mission: init states on a circle + target on the opposite side
         if len(mission_1_ids) > 0:
-            rg_max = self.cfg.flight_range - self.success_dist_thr[mission_1_ids][0] - self.cfg.sampling_range_margin
+            rg_max = self.cfg.flight_range - self.success_dist_thr[mission_1_ids][0] - self.cfg.flight_range_margin
             rg_min = (self.cfg.flight_range - self.success_dist_thr[mission_1_ids][0]) / 2
             if self.cfg.fix_range:
                 rg_max = rg_min
@@ -772,7 +766,7 @@ class SwarmAccEnv(DirectMARLEnv):
         rand_init_p_mis2 = None
         rand_goal_odom_mis2 = None
         if len(mission_2_ids) > 0:
-            rg_max = self.cfg.flight_range - self.success_dist_thr[mission_2_ids][0] - self.cfg.sampling_range_margin
+            rg_max = self.cfg.flight_range - self.success_dist_thr[mission_2_ids][0] - self.cfg.flight_range_margin
             rg_min = (self.cfg.flight_range - self.success_dist_thr[mission_2_ids][0]) / 2
             if self.cfg.fix_range:
                 rg_max = rg_min
@@ -822,7 +816,7 @@ class SwarmAccEnv(DirectMARLEnv):
         rand_init_p_mis3 = None
         rand_goal_p_mis3 = None
         if len(mission_3_ids) > 0:
-            rg = self.cfg.flight_range - self.success_dist_thr[mission_3_ids][0] - self.cfg.sampling_range_margin
+            rg = self.cfg.flight_range - self.success_dist_thr[mission_3_ids][0] - self.cfg.flight_range_margin
 
             rand_init_p_mis3 = torch.zeros(len(mission_3_ids), self.cfg.num_drones, 2, device=self.device)
             done = torch.zeros(len(mission_3_ids), dtype=torch.bool, device=self.device)
@@ -884,7 +878,7 @@ class SwarmAccEnv(DirectMARLEnv):
         rand_init_p_mis4 = None
         rand_goal_p_mis4 = None
         if len(mission_4_ids) > 0:
-            rg_max = self.cfg.flight_range - self.success_dist_thr[mission_4_ids][0] - self.cfg.sampling_range_margin
+            rg_max = self.cfg.flight_range - self.success_dist_thr[mission_4_ids][0] - self.cfg.flight_range_margin
             rg_min = (self.cfg.flight_range - self.success_dist_thr[mission_4_ids][0]) / 2
             if self.cfg.fix_range:
                 rg_max = rg_min
@@ -1184,7 +1178,7 @@ class SwarmAccEnv(DirectMARLEnv):
         mission_reset_ids = {mission_ids: mask.nonzero(as_tuple=False).squeeze(-1) for mission_ids, mask in sync_reset_masks.items()}
         mission_0_ids = mission_reset_ids[0]
         if mission_0_ids.numel() > 0 and not self.cfg.use_custom_traj:
-            rg = self.cfg.flight_range - self.success_dist_thr[mission_0_ids][0] - self.cfg.sampling_range_margin
+            rg = self.cfg.flight_range - self.success_dist_thr[mission_0_ids][0] - self.cfg.flight_range_margin
 
             unified_goal_xy = self.unified_goal_xy[mission_0_ids]
             unified_new_goal_xy = torch.zeros(len(mission_0_ids), 2, device=self.device)
@@ -1231,8 +1225,7 @@ class SwarmAccEnv(DirectMARLEnv):
                         torch.cos(self.ang[mission_1_ids, i]),
                         torch.sin(self.ang[mission_1_ids, i]),
                     ],
-                    dim=1,
-                ) * self.rand_rg[mission_1_ids].unsqueeze(-1)
+                    dim=1) * self.rand_rg[mission_1_ids].unsqueeze(-1)
 
                 self.goals[agent][mission_1_ids, 2] = float(self.cfg.flight_altitude)
                 self.goals[agent][mission_1_ids] += self.terrain.env_origins[mission_1_ids]
@@ -1275,7 +1268,7 @@ class SwarmAccEnv(DirectMARLEnv):
                 continue
 
             mission_3_ids = mission_3_mask.nonzero(as_tuple=False).squeeze(-1)
-            rg = self.cfg.flight_range - self.success_dist_thr[mission_3_ids][0] - self.cfg.sampling_range_margin
+            rg = self.cfg.flight_range - self.success_dist_thr[mission_3_ids][0] - self.cfg.flight_range_margin
 
             rand_goal_p_mis3 = torch.zeros(len(mission_3_ids), self.cfg.num_drones, 2, device=self.device)
             for i_, agent_ in enumerate(self.possible_agents):
