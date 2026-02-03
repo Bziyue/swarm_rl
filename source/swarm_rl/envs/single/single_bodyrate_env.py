@@ -391,9 +391,9 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
     depth_cameras: DepthCameraArrayCfg = DepthCameraArrayCfg(
         cameras = [
             DepthCameraItemCfg(name="front", pos_BC=( 0.02,  0.0,  0.0), quat_BC=(1.0, 0.0, 0.0, 0.0), ),
-            DepthCameraItemCfg(name="right", pos_BC=( 0.0,  -0.02, 0.0), quat_BC=(0.70710678, 0.0, 0.0, 0.70710678), ),
+            DepthCameraItemCfg(name="right", pos_BC=( 0.0,  -0.02, 0.0), quat_BC=(0.70710678, 0.0, 0.0, -0.70710678), ),
             DepthCameraItemCfg(name="back",  pos_BC=(-0.02,  0.0,  0.0), quat_BC=(0.0, 0.0, 0.0, 1.0), ),
-            DepthCameraItemCfg(name="left",  pos_BC=( 0.0,   0.02, 0.0), quat_BC=(0.70710678, 0.0, 0.0, -0.70710678), ),
+            DepthCameraItemCfg(name="left",  pos_BC=( 0.0,   0.02, 0.0), quat_BC=(0.70710678, 0.0, 0.0, 0.70710678), ),
         ],
 
         # 广播字段：写一次默认所有相机通用
@@ -767,6 +767,16 @@ class QuadcopterEnv(DirectRLEnv):
     def _setup_scene(self):
         """Create and clone the environment scene."""
 
+        # 初始化 depth cameras，并注册到 scene 中
+        self._depth_cameras = DepthCameraArray(
+            self.cfg.depth_cameras,
+            device=self.device,
+            camera_cfg_cls=ReloadableRayCasterCameraCfg,
+        )
+        self._depth_cameras.register_to_scene(self.scene)
+        # if self.cfg.enable_debug_camera:
+        #     self._tiled_camera = TiledCamera(self.cfg.tiled_camera)
+
 
         # TODO: 待测试并加入地图、数据收集器
         # # Initialize the map generator and other components
@@ -818,17 +828,6 @@ class QuadcopterEnv(DirectRLEnv):
             #     prims_utils.set_prim_property(prim_path, "visibility", "invisible")
             #     scale = 1.5
             #     prims_utils.set_prim_property(prim_path, "xformOp:scale", (scale, scale, scale))
-
-
-        # 初始化 depth cameras，并注册到 scene 中
-        self._depth_cameras = DepthCameraArray(
-            self.cfg.depth_cameras,
-            device=self.device,
-            camera_cfg_cls=ReloadableRayCasterCameraCfg,
-        )
-        self._depth_cameras.register_to_scene(self.scene)
-        # if self.cfg.enable_debug_camera:
-        #     self._tiled_camera = TiledCamera(self.cfg.tiled_camera)
 
 
         # Clone the scene
@@ -917,11 +916,10 @@ class QuadcopterEnv(DirectRLEnv):
             #     self._death_replay.new_environment(env_data["points"])
 
 
-            # Request mesh reload for all ray-casting cameras after terrain regeneration
-            cameras_to_reload = []
-
-
-            # TODO: 待加入我们的深度相机重加载
+            # 深度相机重新加载地图网格
+            self._depth_cameras.reload_cameras()
+            # # Request mesh reload for all ray-casting cameras after terrain regeneration
+            # cameras_to_reload = []
             # # Main ray-casting camera
             # if "raycast_camera" in self.scene.sensors:
             #     cameras_to_reload.append(("raycast_camera", "main ray-casting camera"))
@@ -938,15 +936,13 @@ class QuadcopterEnv(DirectRLEnv):
             # #         cameras_to_reload.append(("down_tof_camera", "down TOF camera"))
             # #     if "up_tof_camera" in self.scene.sensors:
             # #         cameras_to_reload.append(("up_tof_camera", "up TOF camera"))
-
-
-            # Request mesh reload for all cameras
-            for sensor_name, camera_desc in cameras_to_reload:
-                if hasattr(self.scene.sensors[sensor_name], 'request_mesh_reload'):
-                    self.scene.sensors[sensor_name].request_mesh_reload()
-                    print(f"Requested mesh reload for {camera_desc}")
-                else:
-                    print(f"Warning: {camera_desc} does not support mesh reloading")
+            # # Request mesh reload for all cameras
+            # for sensor_name, camera_desc in cameras_to_reload:
+            #     if hasattr(self.scene.sensors[sensor_name], 'request_mesh_reload'):
+            #         self.scene.sensors[sensor_name].request_mesh_reload()
+            #         print(f"Requested mesh reload for {camera_desc}")
+            #     else:
+            #         print(f"Warning: {camera_desc} does not support mesh reloading")
 
             print(f"Map regeneration complete. New active map: {self._active_map_id}")
 

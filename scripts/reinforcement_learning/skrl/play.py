@@ -70,7 +70,7 @@ simulation_app = app_launcher.app
 import gymnasium as gym
 from loguru import logger
 import os
-import rclpy
+# import rclpy
 import time
 import torch
 
@@ -185,8 +185,8 @@ if __name__ == "__main__":
     logger.remove()
     logger.add(sys.stdout, level=args_cli.verbosity)
 
-    rclpy.init()
+    # rclpy.init()
     main()
-    rclpy.shutdown()
+    # rclpy.shutdown()
 
     simulation_app.close()

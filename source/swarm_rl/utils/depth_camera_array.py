@@ -147,6 +147,17 @@ class DepthCameraArray:
         for k, cam in zip(keys, cams):
             scene.sensors[k] = cam
 
+    def reload_cameras(self) -> None:
+        """Request mesh reload for all cameras."""
+        keys, cams = self.export_instances()
+        # Request mesh reload for all cameras
+        for k, cam in zip(keys, cams):
+            if hasattr(cam, 'request_mesh_reload'):
+                cam.request_mesh_reload()
+                print(f"Requested mesh reload for {k}")
+            else:
+                print(f"Warning: {k} does not support mesh reloading")
+
     # ============================================================
     # Public API
     # ============================================================
