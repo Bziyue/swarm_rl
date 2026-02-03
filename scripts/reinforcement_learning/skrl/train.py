@@ -65,7 +65,7 @@ from datetime import datetime
 import gymnasium as gym
 from loguru import logger
 import random
-import rclpy
+# import rclpy
 import shutil
 import torch
 
@@ -219,8 +219,8 @@ if __name__ == "__main__":
     logger.remove()
     logger.add(sys.stdout, level=args_cli.verbosity)
 
-    rclpy.init()
+    # rclpy.init()
     main()
-    rclpy.shutdown()
+    # rclpy.shutdown()
 
     simulation_app.close()

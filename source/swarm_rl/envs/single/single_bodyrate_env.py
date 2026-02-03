@@ -79,39 +79,32 @@ import cv2
 from swarm_rl.utils.quadcopter import DJI_FPV_CFG
 
 
-# def create_camera_cfg(pos, rot, width=1, height=1, max_distance=4.0, focal_length=20.0, aperture=20.955):
-#     """Create a camera configuration for raycast sensing."""
-#     return ReloadableRayCasterCameraCfg(
-#         prim_path="/World/envs/env_.*/Robot/body",
-#         offset=ReloadableRayCasterCameraCfg.OffsetCfg(pos=pos, rot=rot, convention="world"),
-#         mesh_prim_paths=["/map_mesh"],
-#         max_distance=max_distance,
-#         depth_clipping_behavior="max",
-#         pattern_cfg=patterns.PinholeCameraPatternCfg(
-#             focal_length=focal_length, width=width, height=height,
-#             horizontal_aperture=aperture, vertical_aperture=aperture,
-#         ),
-#         data_types=["distance_to_image_plane"],
-#         update_period=0.0, debug_vis=False,
-#     )
+# @configclass
+# class QuadcopterCameraCfg:
+#     """Configuration for quadcopter camera."""
+
+#     # Camera sensor parameters
+#     camera_max_distance = 4.0  # Maximum sensing distance in meters
+#     camera_focal_length = 20.0  # Camera focal length
+#     camera_aperture = 20.955  # Camera aperture size
+#     debug_camera_offset = (0.05, 0.0, 0.0)  # Debug camera position offset
+
+#     # # TOF sensor FOV
+#     # MP_TOF_FOV = 45.0  # Field of view for the multi-point TOF sensors
+#     # SP_TOF_FOV = 10.0  # Field of view for the single-point TOF sensors
+
+#     # Sensor noise parameters
+#     depth_invalid_rate_max = 0.15  # Maximum rate of invalid depth readings
 
 
 @configclass
-class QuadcopterCameraCfg:
-    """Configuration for quadcopter camera."""
+class QuadcopterSceneCfg(InteractiveSceneCfg):
+    """Configuration for the Quadcopter scene."""
 
-    # Camera sensor parameters
-    camera_max_distance = 4.0  # Maximum sensing distance in meters
-    camera_focal_length = 20.0  # Camera focal length
-    camera_aperture = 20.955  # Camera aperture size
-    debug_camera_offset = (0.05, 0.0, 0.0)  # Debug camera position offset
-
-    # # TOF sensor FOV
-    # MP_TOF_FOV = 45.0  # Field of view for the multi-point TOF sensors
-    # SP_TOF_FOV = 10.0  # Field of view for the single-point TOF sensors
-
-    # Sensor noise parameters
-    depth_invalid_rate_max = 0.15  # Maximum rate of invalid depth readings
+    num_envs: int = None
+    env_spacing: float = 16.0
+    replicate_physics: bool = True
+    filter_collisions: bool = True
 
 
 @configclass
@@ -136,13 +129,38 @@ class QuadcopterObsCfg:
 
 
 @configclass
-class QuadcopterSceneCfg(InteractiveSceneCfg):
-    """Configuration for the Quadcopter scene."""
+class QuadcopterRewardCfg:
+    """Configuration for quadcopter reward."""
+    
+    # reward 权重
+    coef_distance_reward: float             = 1000.0
+    coef_yaw_direction_penalty: float       = 0.3
+    coef_action_magnitude_penalty: float    = 0.0
+    coef_action_change_penalty: float       = 0.1
+    coef_vel_direction_penalty: float       = 0.15
+    coef_vel_speed_excess_penalty: float    = 0.5
+    coef_vel_speed_match_reward: float      = 0.0
+    coef_z_position_penalty: float          = 0.25
+    coef_obstacle_collision_penalty: float  = 80.0
+    coef_esdf_reward: float                 = 0.1
+    coef_succeed_reward: float              = 200.0
+    coef_max_ang_vel_penalty: float         = 0.0
+    coef_max_angle_penalty: float           = 0.0
+    coef_alive_reward: float                = 0.5
+    coef_z_vel_penalty: float               = 0.0
+    # # Position control rewards
+    # coef_lin_vel_reward_scale: float = 0
+    # coef_ang_vel_reward_scale: float = 0
+    # coef_distance_to_goal_reward_scale: float = 0
 
-    num_envs: int = None
-    env_spacing: float = 16.0
-    replicate_physics: bool = True
-    filter_collisions: bool = True
+    # reward 计算参数
+    # distance_goal_mapping_scale = 0.8   # Scale factor for distance-to-goal mapping
+    speed_adjustment_distance = 1.0     # Distance to start speed adjustment
+    z_position_huber_delta = 0.3        # Transition point between quadratic and linear z penalty
+    vel_direction_huber_delta = 0.2     # Transition point for velocity direction Huber penalty
+
+    max_angular_velocity_penalty = 3.14 / 4.0   # rad/s for penalty
+    max_angle_penalty = 3.14 / 4.0              # rad for angle penalty
 
 
 @configclass
@@ -170,7 +188,6 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
     
     observations: QuadcopterObsCfg = QuadcopterObsCfg()
 
-
     # TODO: 待评估、测试并决定是否加入观测历史
     # # History configuration
     # history_length = 10
@@ -179,17 +196,14 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
     # frame_observation_space = 3 + 9 + 3 + 3 + 1 + 1 + 4 + 4  # velocity + rot + gyro + goal_dir + z_err + speed + actions + tof_depths
     # frame_observation_space_critic = frame_observation_space + 9
 
-
     # ========================================================================
     # Data Recording Configuration
     # ========================================================================
-
 
     # TODO: 待测试并加入地图、数据收集器
     # # Data recorder
     # enable_occ_collector = False
     # occ_collector_dir = "/workspace/isaaclab/logs/7-14/multi_goal"
-
 
     # TODO: 待测试并加入死亡回放收集器
     # # DeathReplay configuration
@@ -198,12 +212,9 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
     # death_replay_visualization_num = 10
     # death_replay_data_dir = "/workspace/isaaclab/logs/death_replay"
 
-
     # ========================================================================
     # Sensor Configuration
     # ========================================================================
-
-    camera: QuadcopterCameraCfg = QuadcopterCameraCfg()
 
     # TODO: 待测试并加入地图、数据收集器
     # # Offline data collection option: mask forward 8x8 depth image only for logging
@@ -212,13 +223,6 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
     # # Offline data collection option: freeze IMU/ego state logging to first step of each episode
     # blind_imu = False
     # blind_imu_from_step = 50  # freeze logged quat/lin_vel/ang_vel after this many steps
-
-
-    # TODO: 待评估是否加入 omni_tof
-    # enable_omni_tof = True
-    # # Offline data collection option: add 5x 1x1 ToF (up/down/left/right/back) for logging
-    # add_tof5 = False
-
 
     # ========================================================================
     # Environment Timing Configuration
@@ -232,8 +236,6 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
     action_space        = 1 + 3                             # action: [thrust, bodyrate(x, y, z)]
     observation_space   = 3 + 9 + 3 + 1 + 4 + 32*16         # obs-policy: [gyro + rot + goal + speed + actions + depth]
     state_space         = observation_space + 3 + 3 + 3     # obs-critic: [gyro + rot + goal + speed + actions + depth + vel + goal_dir + obstacle_pos]
-    # observation_space   = 3 + 9 + 3 + 1 + 4                 # obs-policy: [gyro + rot + goal + speed + actions + depth]
-    # state_space         = observation_space + 3 + 3 + 3     # obs-critic: [gyro + rot + goal + speed + actions + depth + vel + goal_dir + obstacle_pos]
 
     debug_vis           = True  # debug 可视化
 
@@ -282,7 +284,6 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
     # robot_mass = 0.049  # kg
     # robot_arm_length = 0.046  # m
     # robot_inertia = [2.16e-5, 2.16e-5, 4.33e-5]  # kg*m^2 [Ixx, Iyy, Izz]
-
     # Robot physical parameters
     robot_mass = 1.0  # kg
     robot_inertia = [6.8e-4, 4.8e-4, 8.5e-4]  # kg*m^2 [Ixx, Iyy, Izz]
@@ -300,7 +301,6 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
     # ========================================================================
     # Environmental Effects Configuration
     # ========================================================================
-
 
     # TODO: 待测试并加入油门不确定度、风扰动
     # # Wind generation parameters
@@ -322,22 +322,19 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
     # height_randomization_noise_scale = 0.1  # Amplitude of natural pilot variation
     # height_randomization_debug_dir = None
 
-
     # ========================================================================
     # Map Generation Configuration
     # ========================================================================
 
-
     # TODO: 考虑抽象为多地图管理器对象
     # Map generation parameters
-    map_generation_step_threshold = 3000 * num_goals
+    map_generation_step_threshold = 3000000000000 * num_goals   # 暂时不更新地图
     obstacle_min_distance_init = 1.5
     obstacle_min_distance_min = 0.4
     map_spacing_factor = 0.8  # Factor for map spacing relative to env_spacing
     obstacle_size_range = (0.4, 0.8)  # Size range for obstacles
     floater_size_range = (0.4, 0.8)  # Size range for floating obstacles
     goal_sampling_noise_range = 0.15  # Noise range for goal position sampling
-
 
     # ========================================================================
     # Scene Configuration
@@ -358,7 +355,7 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
         track_air_time=False,
         debug_vis=False,
     )
-
+    contact_force_threshold = 0.01  # Minimum contact force for collision detection
 
     # depth_cameras: DepthCameraArrayCfg = DepthCameraArrayCfg(
     #     cameras = [
@@ -383,7 +380,6 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
     #     debug_vis = False,
 
     #     usd_focal_length=24.0,
-
         
     #     normalize = "0_1",      # 或 "none" / "-1_1"
     #     flatten = False,
@@ -392,8 +388,6 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
     #     invalid_sampling = "per_frame",
     #     invalid_fill_value = "max_distance",
     # )
-
-
     depth_cameras: DepthCameraArrayCfg = DepthCameraArrayCfg(
         cameras = [
             DepthCameraItemCfg(name="front", pos_BC=( 0.02,  0.0,  0.0), quat_BC=(1.0, 0.0, 0.0, 0.0), ),
@@ -417,7 +411,6 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
         debug_vis = False,
 
         usd_focal_length=24.0,
-
         
         normalize = "0_1",      # 或 "none" / "-1_1"
         flatten = False,
@@ -426,53 +419,15 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
         invalid_sampling = "per_frame",
         invalid_fill_value = "max_distance",
     )
-    
-
-
-
-    # TODO: 待评估是否加入 omni_tof
-    # # Omnidirectional TOF cameras (only created if enabled)
-    # if enable_omni_tof:
-    #     left_tof_camera: ReloadableRayCasterCameraCfg = create_camera_cfg(
-    #         pos=(0.0, 0.02, 0.0), rot=(0.7071, 0.0, 0.0, 0.7071),
-    #         max_distance=camera_max_distance, focal_length=camera_focal_length, aperture=camera_aperture)
-
-    #     right_tof_camera: ReloadableRayCasterCameraCfg = create_camera_cfg(
-    #         pos=(0.0, -0.02, 0.0), rot=(0.7071, 0.0, 0.0, -0.7071),
-    #         max_distance=camera_max_distance, focal_length=camera_focal_length, aperture=camera_aperture)
-
-    #     back_tof_camera: ReloadableRayCasterCameraCfg = create_camera_cfg(
-    #         pos=(-0.02, 0.0, 0.0), rot=(0.0, 0.0, 0.0, 1.0),
-    #         max_distance=camera_max_distance, focal_length=camera_focal_length, aperture=camera_aperture)
-
-    #     down_tof_camera: ReloadableRayCasterCameraCfg = create_camera_cfg(
-    #         pos=(0.0, 0.0, -0.02), rot=(0.7071, 0.0, 0.7071, 0.0),
-    #         max_distance=camera_max_distance, focal_length=camera_focal_length, aperture=camera_aperture)
-
-    #     up_tof_camera: ReloadableRayCasterCameraCfg = create_camera_cfg(
-    #         pos=(0.0, 0.0, 0.02), rot=(0.7071, 0.0, -0.7071, 0.0),
-    #         max_distance=camera_max_distance, focal_length=camera_focal_length, aperture=camera_aperture)
-
 
     # TODO: 待评估、测试并决定是否加入观测历史
     # # Calculate total observation space with history
     # depth_cam_dims = raycast_camera.pattern_cfg.height * raycast_camera.pattern_cfg.width
     # observation_space = history_length * frame_observation_space + depth_cam_history * depth_cam_dims
 
-
     # ========================================================================
     # Curriculum Configuration
     # ========================================================================
-
-    if curriculum_stage == "yaw_alignment":
-        c_distance_reward = 0.0
-        c_z_position_penalty = 0.0
-        scene.num_envs = 45000
-        spawn_mode = "edges"  # Spawn from edges for yaw alignment stage
-    elif curriculum_stage == "static_goals":
-        c_distance_reward = 8.0
-        c_z_position_penalty = 0.25
-        scene.num_envs = 26000
 
     # Hover stabilization curriculum
     hover_hold_initial_s = 0.0
@@ -486,27 +441,7 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
     # Reward Configuration
     # ========================================================================
 
-    # Reward coefficients
-    reward_coef_distance_reward: float = c_distance_reward
-    reward_coef_yaw_direction_penalty: float = 0.3
-    reward_coef_action_magnitude_penalty: float = 0.3
-    reward_coef_action_change_penalty: float = 0.5
-    reward_coef_vel_direction_penalty: float = 0.15
-    reward_coef_vel_speed_excess_penalty: float = 0.5
-    reward_coef_vel_speed_match_reward: float = 0.0
-    reward_coef_z_position_penalty: float = c_z_position_penalty
-    reward_coef_obstacle_collision_penalty: float = 80.0
-    reward_coef_esdf_reward: float = 0.1
-    reward_coef_succeed_reward: float = 80.0
-    reward_coef_max_ang_vel_penalty: float = 0.0
-    reward_coef_max_angle_penalty: float = 0.0
-    reward_coef_alive_reward: float = 0.0
-    reward_coef_z_vel_penalty: float = 0.0
-
-    # Position control rewards
-    reward_coef_lin_vel_reward_scale: float = 0
-    reward_coef_ang_vel_reward_scale: float = 0
-    reward_coef_distance_to_goal_reward_scale: float = 0
+    reward : QuadcopterRewardCfg = QuadcopterRewardCfg()
 
     # ========================================================================
     # Physical Limits and Safety Configuration
@@ -514,15 +449,6 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
 
     # Angular limits
     max_angular_velocity_check = 3.14 * 2.0 * 20.0  # rad/s for stability check
-    max_angular_velocity_penalty = 3.14 / 4.0  # rad/s for penalty
-    max_angle_penalty = 3.14 / 4.0  # rad for angle penalty
-
-    # Reward calculation parameters
-    distance_goal_mapping_scale = 0.8  # Scale factor for distance-to-goal mapping
-    speed_adjustment_distance = 1.0  # Distance to start speed adjustment
-    contact_force_threshold = 0.01  # Minimum contact force for collision detection
-    z_position_huber_delta = 0.3  # Transition point between quadratic and linear z penalty
-    vel_direction_huber_delta = 0.2  # Transition point for velocity direction Huber penalty
 
     # ========================================================================
     # Metrics and Logging Configuration
@@ -536,6 +462,19 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
     light_color = (0.75, 0.75, 0.75)  # Dome light color
 
 
+    def __post_init__(self):
+        super().__post_init__()
+
+        if self.curriculum_stage == "yaw_alignment":
+            self.scene.num_envs = 45000
+            self.spawn_mode = "edges"  # Spawn from edges for yaw alignment stage
+            self.reward.coef_distance_reward = 0.0
+            self.reward.coef_z_position_penalty = 0.0
+        elif self.curriculum_stage == "static_goals":
+            self.scene.num_envs = 26000
+            self.reward.coef_distance_reward = 80.0
+            self.reward.coef_z_position_penalty = 0.25
+            
 
 
 # TODO: 待评估窗口管理是什么作用
@@ -567,8 +506,10 @@ class QuadcopterEnv(DirectRLEnv):
     cfg: QuadcopterEnvCfg
 
     def __init__(self, cfg: QuadcopterEnvCfg, render_mode: str | None = None, **kwargs):
+
         super().__init__(cfg, render_mode, **kwargs)
         self.render_mode = "human"
+        self.extras["log"] = dict() # 初始化日志字典
 
 
         # TODO: 待测试并加入油门不确定度、风扰动
@@ -612,8 +553,6 @@ class QuadcopterEnv(DirectRLEnv):
         #     )
         # else:
         #     self._height_randomizer = None
-
-
 
 
         # TODO: self._robot_mass, self._robot_inertia 仿真与代码中不一致是为什么（底层控制器会用到）
@@ -660,20 +599,23 @@ class QuadcopterEnv(DirectRLEnv):
         self._controller_kp_bodyrate = torch.tensor(self.cfg.kp_bodyrate, device=self.device)
 
 
-
-
-        # Quadcopter references
+        # 策略 action
         self._actions       = torch.zeros(self.num_envs, self.cfg.action_space, device=self.device) # [thrust, bodyrate(x, y, z)]
         self._last_actions  = torch.zeros(self.num_envs, self.cfg.action_space, device=self.device) # [thrust, bodyrate(x, y, z)]
+        # 低层控制量
+        self._thrust_max    = self.cfg.thrust_weight_ratio * self.cfg.robot_mass * 9.81 # 最大推力 (推重比 * M * g)
+        self._bodyrate_max  = self.cfg.bodyrate_max                                     # 最大角速度
         self._thrust_desired    = torch.zeros(self.num_envs, 1, device=self.device) # 策略 action 映射到的期望油门
         self._bodyrate_desired  = torch.zeros(self.num_envs, 3, device=self.device) # 策略 action 映射到的期望角速度 (x, y, z)
         self._forces    = torch.zeros(self.num_envs, 1, 3, device=self.device)  # 控制器计算出的控制力
         self._torques   = torch.zeros(self.num_envs, 1, 3, device=self.device)  # 控制器计算出的控制力矩
 
-        self._thrust_max    = self.cfg.thrust_weight_ratio * self.cfg.robot_mass * 9.81 # 最大推力 (推重比 * M * g)
-        self._bodyrate_max  = self.cfg.bodyrate_max                                     # 最大角速度
-
-
+        # “上一时刻” 数据
+        self._last_pos_w = torch.zeros(self.num_envs, 3, device=self.device)
+        # done 相关标志
+        self._numerical_instability = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self._is_contact = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self._is_success = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
 
 
         # TODO: 可以抽象为目标管理对象
@@ -689,13 +631,12 @@ class QuadcopterEnv(DirectRLEnv):
         self._desired_speed = self._desired_speed_init
 
 
-
-
         # TODO: 刚体名写成可配置参数；进行打印、收紧逻辑以确保映射正确
         # Robot references
-        self._body_id = [self._robot.find_bodies("body")[0]]
-        self._undesired_contact_body_ids, _ = self._contact_sensor.find_bodies("body")
-
+        body_id, _ = self._robot.find_bodies("body")
+        self._body_id = torch.tensor(body_id, dtype=torch.long, device=self.device)
+        contact_ids, _ = self._contact_sensor.find_bodies("body")
+        self._undesired_contact_ids = torch.tensor(contact_ids, dtype=torch.long, device=self.device)
 
 
 
@@ -709,17 +650,6 @@ class QuadcopterEnv(DirectRLEnv):
         # # Critic observation history buffers (same structure as policy but for noise-free observations)
         # self._critic_obs_history = torch.zeros(self.num_envs, self.cfg.history_length, self.cfg.frame_observation_space_critic, device=self.device)
         # self._critic_depth_history = torch.zeros(self.num_envs, self.cfg.depth_cam_history, self.cfg.depth_cam_dims, device=self.device)
-
-
-
-
-        self._last_pos_w = torch.zeros(self.num_envs, 3, device=self.device)
-        self._is_contact = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-        self._last_closest_dist = torch.zeros(self.num_envs, device=self.device)
-        self._numerical_instability = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-        self._is_success = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-
-
 
 
         # TODO: 考虑抽象为多地图管理器对象
@@ -737,8 +667,6 @@ class QuadcopterEnv(DirectRLEnv):
         # Legacy variables for compatibility
         self.occ_kdtree = None
         self.free_points = np.array([[0, 0, 0]], dtype=np.float32)
-
-
 
 
         # TODO: 待测试并加入 noise
@@ -765,8 +693,6 @@ class QuadcopterEnv(DirectRLEnv):
         # )
 
 
-
-
         # TODO: 考虑抽象为回合评估统计对象
         # Add tracking for episode outcomes and success rate
         self._success_rate_window = self.cfg.success_rate_window_size
@@ -779,13 +705,9 @@ class QuadcopterEnv(DirectRLEnv):
         self._final_distances = collections.deque(maxlen=self._success_rate_window)
 
 
-
-
         # TODO: 可以抽象为目标管理对象
         self._hover_hold_counter_s = torch.zeros(self.num_envs, device=self.device)
         self._hover_hold_requirement_s = self.cfg.hover_hold_initial_s
-
-
 
 
         self.set_debug_vis(self.cfg.debug_vis)
@@ -869,8 +791,6 @@ class QuadcopterEnv(DirectRLEnv):
         #     self._death_replay = None
 
 
-
-
         # TODO: 考虑抽象为多地图管理器对象
         # Initialize dual map system BEFORE camera setup
         self._active_map_id = 0  # 0 or 1
@@ -883,8 +803,6 @@ class QuadcopterEnv(DirectRLEnv):
         self._map_regeneration_in_progress = False
         self._map_generation_timer = self.cfg.map_generation_step_threshold
         self._regenerate_terrain()
-
-
 
 
         # TODO: self._robot_mass, self._robot_inertia 仿真与代码中不一致是为什么（底层控制器会用到）
@@ -902,7 +820,6 @@ class QuadcopterEnv(DirectRLEnv):
             #     prims_utils.set_prim_property(prim_path, "xformOp:scale", (scale, scale, scale))
 
 
-
         # 初始化 depth cameras，并注册到 scene 中
         self._depth_cameras = DepthCameraArray(
             self.cfg.depth_cameras,
@@ -912,32 +829,6 @@ class QuadcopterEnv(DirectRLEnv):
         self._depth_cameras.register_to_scene(self.scene)
         # if self.cfg.enable_debug_camera:
         #     self._tiled_camera = TiledCamera(self.cfg.tiled_camera)
-        #     self.scene.sensors["tiled_camera"] = self._tiled_camera
-        #     self._raycast_camera1 = self.cfg.raycast_camera1.class_type(self.cfg.raycast_camera1)
-        #     self.scene.sensors["raycast_camera1"] = self._raycast_camera1
-        #     self._raycast_camera2 = self.cfg.raycast_camera2.class_type(self.cfg.raycast_camera2)
-        #     self.scene.sensors["raycast_camera2"] = self._raycast_camera2
-        #     self._raycast_camera3 = self.cfg.raycast_camera3.class_type(self.cfg.raycast_camera3)
-        #     self.scene.sensors["raycast_camera3"] = self._raycast_camera3
-        #     self._raycast_camera4 = self.cfg.raycast_camera4.class_type(self.cfg.raycast_camera4)
-        #     self.scene.sensors["raycast_camera4"] = self._raycast_camera4
-
-        # # Set up main camera using ReloadableRayCasterCamera only
-        # self._raycast_camera = self.cfg.raycast_camera.class_type(self.cfg.raycast_camera)
-
-
-
-
-        # TODO: 待评估是否加入 omni_tof
-        # # Set up omnidirectional TOF sensors if enabled
-        # if self.cfg.enable_omni_tof:
-        #     # ReloadableRayCasterCamera TOF sensors only
-        #     self._left_tof_camera = self.cfg.left_tof_camera.class_type(self.cfg.left_tof_camera)
-        #     self._right_tof_camera = self.cfg.right_tof_camera.class_type(self.cfg.right_tof_camera)
-        #     self._back_tof_camera = self.cfg.back_tof_camera.class_type(self.cfg.back_tof_camera)
-        #     self._down_tof_camera = self.cfg.down_tof_camera.class_type(self.cfg.down_tof_camera)
-        #     if getattr(self.cfg, "add_tof5", False):
-        #         self._up_tof_camera = self.cfg.up_tof_camera.class_type(self.cfg.up_tof_camera)
 
 
         # Clone the scene
@@ -945,22 +836,6 @@ class QuadcopterEnv(DirectRLEnv):
 
         # Add the robot and camera to the scene
         self.scene.articulations["robot"] = self._robot
-
-        # # Add ReloadableRayCasterCamera to the scene
-        # self.scene.sensors["raycast_camera"] = self._raycast_camera
-
-
-        # TODO: 待评估是否加入 omni_tof
-        # # Add omnidirectional TOF sensors to the scene if enabled
-        # if self.cfg.enable_omni_tof:
-        #     # ReloadableRayCasterCamera TOF sensors only
-        #     self.scene.sensors["left_tof_camera"] = self._left_tof_camera
-        #     self.scene.sensors["right_tof_camera"] = self._right_tof_camera
-        #     self.scene.sensors["back_tof_camera"] = self._back_tof_camera
-        #     self.scene.sensors["down_tof_camera"] = self._down_tof_camera
-        #     if getattr(self.cfg, "add_tof5", False):
-        #         self.scene.sensors["up_tof_camera"] = self._up_tof_camera
-
 
         # Add lights
         light_cfg = sim_utils.DomeLightCfg(intensity=self.cfg.light_intensity, color=self.cfg.light_color)
@@ -975,8 +850,6 @@ class QuadcopterEnv(DirectRLEnv):
         # Simulation settings
         # NO_RENDERING = 0, PARTIAL_RENDERING = 1, FULL_RENDERING = 2, NO_GUI_OR_RENDERING = -1
         self.sim.set_render_mode(SimulationContext.RenderMode.NO_RENDERING)
-
-
 
 
         # TODO: 考虑抽象为多地图管理器对象
@@ -1047,24 +920,24 @@ class QuadcopterEnv(DirectRLEnv):
             # Request mesh reload for all ray-casting cameras after terrain regeneration
             cameras_to_reload = []
 
-            # Main ray-casting camera
-            if "raycast_camera" in self.scene.sensors:
-                cameras_to_reload.append(("raycast_camera", "main ray-casting camera"))
 
-
-            # TODO: 待评估是否加入 omni_tof
-            # # TOF cameras if enabled
-            # if self.cfg.enable_omni_tof:
-            #     if "left_tof_camera" in self.scene.sensors:
-            #         cameras_to_reload.append(("left_tof_camera", "left TOF camera"))
-            #     if "right_tof_camera" in self.scene.sensors:
-            #         cameras_to_reload.append(("right_tof_camera", "right TOF camera"))
-            #     if "back_tof_camera" in self.scene.sensors:
-            #         cameras_to_reload.append(("back_tof_camera", "back TOF camera"))
-            #     if "down_tof_camera" in self.scene.sensors:
-            #         cameras_to_reload.append(("down_tof_camera", "down TOF camera"))
-            #     if "up_tof_camera" in self.scene.sensors:
-            #         cameras_to_reload.append(("up_tof_camera", "up TOF camera"))
+            # TODO: 待加入我们的深度相机重加载
+            # # Main ray-casting camera
+            # if "raycast_camera" in self.scene.sensors:
+            #     cameras_to_reload.append(("raycast_camera", "main ray-casting camera"))
+            # # TODO: 待评估是否加入 omni_tof
+            # # # TOF cameras if enabled
+            # # if self.cfg.enable_omni_tof:
+            # #     if "left_tof_camera" in self.scene.sensors:
+            # #         cameras_to_reload.append(("left_tof_camera", "left TOF camera"))
+            # #     if "right_tof_camera" in self.scene.sensors:
+            # #         cameras_to_reload.append(("right_tof_camera", "right TOF camera"))
+            # #     if "back_tof_camera" in self.scene.sensors:
+            # #         cameras_to_reload.append(("back_tof_camera", "back TOF camera"))
+            # #     if "down_tof_camera" in self.scene.sensors:
+            # #         cameras_to_reload.append(("down_tof_camera", "down TOF camera"))
+            # #     if "up_tof_camera" in self.scene.sensors:
+            # #         cameras_to_reload.append(("up_tof_camera", "up TOF camera"))
 
 
             # Request mesh reload for all cameras
@@ -1207,7 +1080,6 @@ class QuadcopterEnv(DirectRLEnv):
         # # print(f"Env[0] - Force: {self._forces[0]}, Torque: {self._torques[0]}")
 
 
-
         # print("===================================================")
         # print("pos_w:", self._robot.data.root_state_w[0, :3])
         # print("lin_vel_w:", self._robot.data.root_state_w[0, 7:10])
@@ -1220,7 +1092,6 @@ class QuadcopterEnv(DirectRLEnv):
         # print("inertia:", self._robot_inertia[0])
         # print("controller_kp_bodyrate:", self._controller_kp_bodyrate[0])
         # print("===================================================\n")
-
 
 
         self._robot.set_external_force_and_torque(self._forces, self._torques, body_ids=self._body_id)
@@ -1244,9 +1115,10 @@ class QuadcopterEnv(DirectRLEnv):
         #     # Apply height randomization to current goal positions
         #     self._desired_pos_w = self._height_randomizer.apply_to_goals(self._desired_pos_w)
 
-
-
-        # 获取多相机深度图像
+        # ----------------------------------------
+        # 原始数据读取
+        # ----------------------------------------
+        # 多相机深度图像
         max_d = self.cfg.depth_cameras.max_distance
         depth_image_list = self._depth_cameras.read_batch()
 
@@ -1254,20 +1126,16 @@ class QuadcopterEnv(DirectRLEnv):
         # print(depth_image_list[0].shape)
         # print(depth_image.shape)
 
-
-
         # TODO: 待加入多相机类中
         # Debug: visualize depth images
         # depth_image_cat = torch.cat(depth_image_list, dim=2)
         # depth_image_cat = depth_image_cat[0].squeeze(-1)
         # H, W = depth_image_cat.shape
         # depth_image_cat_u8 = torch.clamp((depth_image_cat / max_d * 255.0), 0, 255).to(torch.uint8)
-
         # scale = 32
         # new_w = max(1, int(W * scale))
         # new_h = max(1, int(H * scale))
         # img_big = cv2.resize(depth_image_cat_u8.cpu().numpy(), (new_w, new_h), interpolation=cv2.INTER_NEAREST)
-
         # win = "Raycast Camera Robot 0 Depth"
         # if not hasattr(self, "_cv_win_inited"):
         #     self._cv_win_inited = set()
@@ -1275,11 +1143,8 @@ class QuadcopterEnv(DirectRLEnv):
         #     cv2.namedWindow(win, cv2.WINDOW_NORMAL)
         #     cv2.resizeWindow(win, new_w, new_h)  # 给个初始大窗口
         #     self._cv_win_inited.add(win)
-
         # cv2.imshow(win, img_big)
         # cv2.waitKey(1)
-
-
 
         
         # TODO: 可参考人家噪声是怎么加的
@@ -1294,37 +1159,18 @@ class QuadcopterEnv(DirectRLEnv):
         #                       torch.tensor(self.cfg.camera_max_distance, device=self.device, dtype=depth_image.dtype),
         #                       depth_image)
 
+        # 当前机器人状态量
+        pos_w     = robot_data.root_state_w[:, :3]
+        quat_w    = robot_data.root_quat_w
+        lin_vel_b = robot_data.root_lin_vel_b
+        ang_vel_b = robot_data.root_ang_vel_b
+
 
         # TODO: 待测试并加入地图、数据收集器
         # depth_image_for_logging = depth_image
         # if getattr(self.cfg, "blind_tof", False):
         #     blind_value = getattr(self.cfg, "blind_tof_value", self.cfg.camera_max_distance)
         #     depth_image_for_logging = torch.full_like(depth_image, blind_value)
-
-
-        # TODO: 待评估是否加入 omni_tof
-        # # Initialize omnidirectional TOF values with zeros
-        # left_depth = torch.zeros(self.num_envs, device=self.device)
-        # right_depth = torch.zeros(self.num_envs, device=self.device)
-        # back_depth = torch.zeros(self.num_envs, device=self.device)
-        # down_depth = torch.zeros(self.num_envs, device=self.device)
-        # up_depth = torch.zeros(self.num_envs, device=self.device)
-        # # Process omnidirectional TOF data if enabled
-        # if self.cfg.enable_omni_tof:
-        #     # Use ReloadableRayCasterCamera TOF sensors (1x1 resolution for direct single-point measurements)
-        #     left_depth = self._left_tof_camera.data.output["distance_to_image_plane"][:, 0, 0, 0]  # Extract single pixel value
-        #     right_depth = self._right_tof_camera.data.output["distance_to_image_plane"][:, 0, 0, 0]  # Extract single pixel value
-        #     back_depth = self._back_tof_camera.data.output["distance_to_image_plane"][:, 0, 0, 0]  # Extract single pixel value
-        #     down_depth = self._down_tof_camera.data.output["distance_to_image_plane"][:, 0, 0, 0]  # Extract single pixel value
-        #     if getattr(self.cfg, "add_tof5", False):
-        #         up_depth = self._up_tof_camera.data.output["distance_to_image_plane"][:, 0, 0, 0]
-
-
-        # 获取当前机器人状态量
-        pos_w     = robot_data.root_state_w[:, :3]
-        quat_w    = robot_data.root_quat_w
-        lin_vel_b = robot_data.root_lin_vel_b
-        ang_vel_b = robot_data.root_ang_vel_b
 
 
         # TODO: 待测试并加入地图、数据收集器
@@ -1389,7 +1235,9 @@ class QuadcopterEnv(DirectRLEnv):
         # goal_directions = relative_pos_to_goal / (goal_distances + 1e-5)  # Normalize to get direction
         # relative_pos_to_goal_clamped = goal_directions * torch.clamp(goal_distances, max=5.0)
 
-
+        # ----------------------------------------
+        # 计算每项观测量
+        # ----------------------------------------
         # TODO: 下面obs计算归一化计算可抽象成函数；对于 fp16/bf16 可以提升到 fp32 统一处理
 
         # 计算旋转矩阵
@@ -1427,8 +1275,10 @@ class QuadcopterEnv(DirectRLEnv):
         dir_to_obstacle = pos_to_obstacle / distance_to_obstacle.clamp_min(eps)
         pos_to_obstacle_norm = dir_to_obstacle * torch.clamp(distance_to_obstacle / obs_cfg.max_obstacle_distance, max=1.0)
 
-
-        # Map the observations to appropriate ranges for neural network input (POLICY - with noise)
+        # ----------------------------------------
+        # 构造观测向量
+        # ----------------------------------------
+        # 构造 policy 网络观测
         policy_obs = torch.cat(
             [
                 # TODO: 待测试并加入 noise
@@ -1457,7 +1307,7 @@ class QuadcopterEnv(DirectRLEnv):
             ],
             dim=-1,
         )
-
+        # 构造 critic 网络观测
         critic_obs = torch.cat(
             [
                 # TODO: 原定义观测
@@ -1497,7 +1347,7 @@ class QuadcopterEnv(DirectRLEnv):
             ],
             dim=-1,
         )
-
+        # 观测值检查
         policy_obs = self.CHECK_NAN(policy_obs, "Policy Observation")
         critic_obs = self.CHECK_NAN(critic_obs, "Critic Observation")
         self.CHECK_state()
@@ -1509,13 +1359,11 @@ class QuadcopterEnv(DirectRLEnv):
         # current_depth = policy_obs[:, -self.cfg.depth_cam_dims:] # Extract current depth frame
         # self._depth_history = torch.cat([self._depth_history[:, 1:], current_depth.unsqueeze(dim=1)], dim=1)
         # policy_obs_final = torch.cat([self._obs_history.view(self.num_envs, -1), self._depth_history.view(self.num_envs, -1)], dim=-1)
-
         # # Update critic history with noise-free observations (same pattern as policy)
         # self._critic_obs_history = torch.cat([self._critic_obs_history[:, 1:], critic_obs[:, :-self.cfg.depth_cam_dims].unsqueeze(dim=1)], dim=1)
         # current_critic_depth = critic_obs[:, -self.cfg.depth_cam_dims:]
         # self._critic_depth_history = torch.cat([self._critic_depth_history[:, 1:], current_critic_depth.unsqueeze(dim=1)], dim=1)
         # critic_obs_final = torch.cat([self._critic_obs_history.view(self.num_envs, -1), self._critic_depth_history.view(self.num_envs, -1)], dim=-1)
-
         # return {"policy": policy_obs_final, "critic": critic_obs_final}
 
 
@@ -1529,6 +1377,9 @@ class QuadcopterEnv(DirectRLEnv):
         Calculate the reward for each environment.
         """
 
+        reward_cfg = self.cfg.reward
+        robot_data = self._robot.data
+
         # Current position, orientation, and velocity of the robot
         # start = torch.cuda.Event(enable_timing=True)
         # end = torch.cuda.Event(enable_timing=True)
@@ -1538,6 +1389,9 @@ class QuadcopterEnv(DirectRLEnv):
         rot_E_w = torch.stack([normallize_angle(rot_E_w[:, 0]), normallize_angle(rot_E_w[:, 1]), normallize_angle(rot_E_w[:, 2])], dim=1)
         vel_b = self._robot.data.root_lin_vel_b
 
+        # ----------------------------------------
+        # 计算每项奖励和惩罚
+        # ----------------------------------------
         # TODO: 重新思考抵达目标点+保持期望速度的奖励机制（比如可参考 “Extreme Parkour” 文章的内积设计）
         # distance to goal center [-0.01, 0.01] (1m/s / 100steps)
         distance_to_gap = (pos_w - self._desired_pos_w).norm(dim=1)
@@ -1553,7 +1407,6 @@ class QuadcopterEnv(DirectRLEnv):
         dir_to_goal = (self._desired_pos_w - pos_w)[:, :2]
         dir_to_goal = dir_to_goal / (dir_to_goal.norm(dim=-1, keepdim=True) + 1e-6)
         yaw_direction_penalty = (dir_body_w * dir_to_goal).sum(dim=-1) - 1.0
-
 
         # action magnitude penalty [-6, 0]
         # shape is (num_envs, 4) -> thrust + rates
@@ -1580,7 +1433,7 @@ class QuadcopterEnv(DirectRLEnv):
         safe_speed = torch.clamp(speed, min=1e-6)
         cos_forward = torch.clamp(vel_b[:, 0] / safe_speed, -1.0, 1.0)
         direction_misalignment = speed * (1.0 - cos_forward)
-        vel_dir_delta = max(self.cfg.vel_direction_huber_delta, 1e-6)
+        vel_dir_delta = max(reward_cfg.vel_direction_huber_delta, 1e-6)
         vel_dir_delta_tensor = torch.tensor(vel_dir_delta, device=self.device, dtype=direction_misalignment.dtype)
         quadratic_region = 0.5 * direction_misalignment.square() / vel_dir_delta_tensor
         linear_region = direction_misalignment - 0.5 * vel_dir_delta_tensor
@@ -1588,7 +1441,7 @@ class QuadcopterEnv(DirectRLEnv):
 
         # Adjust desired speed based on distance to goal
         # Linearly decrease speed when within distance threshold of goal
-        speed_adjust_start = self.cfg.speed_adjustment_distance  # Start slowing down
+        speed_adjust_start = reward_cfg.speed_adjustment_distance  # Start slowing down
         speed_adjust_end = 0.0   # Speed should be zero
         slowdown_factor = torch.clamp((speed_adjust_start - distance_to_goal) / (speed_adjust_start - speed_adjust_end), 0.0, 1.0)
         yaw_direction_penalty = yaw_direction_penalty * (1.0 - slowdown_factor)
@@ -1599,14 +1452,10 @@ class QuadcopterEnv(DirectRLEnv):
         )
 
 
-
-
         # TODO: 可以抽象为目标管理对象
         # Adjust desired speed: original speed when far, 0 when at goal
         desired_speed = self._desired_speed_init.squeeze(-1) * (1.0 - slowdown_factor)
         self._desired_speed = desired_speed.unsqueeze(-1)  # Ensure it's a column vector
-
-
 
 
         # Speed magnitude penalty [-5, 0]
@@ -1625,13 +1474,12 @@ class QuadcopterEnv(DirectRLEnv):
         # z position penalty shaped with Huber loss [-5, 0]
         z_pos = pos_w[:, 2]
         z_err = z_pos - self._desired_pos_w[:, 2]
-        delta = max(self.cfg.z_position_huber_delta, 1e-6)
+        delta = max(reward_cfg.z_position_huber_delta, 1e-6)
         delta_tensor = torch.tensor(delta, device=self.device, dtype=z_pos.dtype)
         abs_z_err = torch.abs(z_err)
         quadratic_region = 0.5 * abs_z_err.square() / delta_tensor
         linear_region = abs_z_err - 0.5 * delta_tensor
         z_position_penalty = -torch.where(abs_z_err <= delta_tensor, quadratic_region, linear_region)
-
 
         # collision penalty. [-1, 0]
         obstacle_collision_penalty = torch.where(
@@ -1656,8 +1504,6 @@ class QuadcopterEnv(DirectRLEnv):
                 -(torch.exp(5.0 * (safe_threshold - nearest_obstacle_distances)) - 1.0),
                 torch.zeros_like(nearest_obstacle_distances),
             )
-
-
 
         
         # TODO: 可以抽象为目标管理对象
@@ -1699,6 +1545,7 @@ class QuadcopterEnv(DirectRLEnv):
 
             # Mark environments as successful if they completed all goals
             if len(final_success_env_ids) > 0:
+                # TODO: 此处成功检测会导致 get_done / reset_idx 滞后触发
                 self._is_success[final_success_env_ids] = True
 
             # Update current goal for environments that still have goals remaining
@@ -1712,13 +1559,11 @@ class QuadcopterEnv(DirectRLEnv):
                 #     self._death_replay.set_target_positions(self._desired_pos_w)
 
 
-
-
         # Succeed reward [0, 1] - only for individual goal completion
         succeed_reward = goal_completion_mask.float()
 
         # Angular velocity penalty
-        max_angular_velocity = self.cfg.max_angular_velocity_penalty # rad/s
+        max_angular_velocity = reward_cfg.max_angular_velocity_penalty # rad/s
         ang_vel_b = self._robot.data.root_ang_vel_b.clone() # (num_envs, 3)
         max_ang_vel_penalty = torch.where(
             torch.abs(ang_vel_b) > max_angular_velocity,
@@ -1728,7 +1573,7 @@ class QuadcopterEnv(DirectRLEnv):
         max_ang_vel_penalty = torch.sum(max_ang_vel_penalty, dim=1)
 
         # Angle penalty [-20, 0]
-        max_angle = self.cfg.max_angle_penalty # rad
+        max_angle = reward_cfg.max_angle_penalty # rad
         max_angle_penalty = torch.where(
             torch.abs(rot_E_w[:, :2]) > max_angle,
             -torch.clamp(torch.exp(torch.abs(torch.abs(rot_E_w[:, :2]) - max_angle)) - 1.0, max=10.0),
@@ -1745,67 +1590,54 @@ class QuadcopterEnv(DirectRLEnv):
         # Alive reward (before collision) [0, 1]
         alive_reward = torch.logical_not(torch.logical_or(self._is_success, self._is_contact)).float()
 
-        # TODO: 意图不名，是惩罚吗？
-        lin_vel = torch.sum(torch.square(self._robot.data.root_lin_vel_b), dim=1)
-        ang_vel = torch.sum(torch.square(self._robot.data.root_ang_vel_b), dim=1)
+        # # TODO: 意图不名，是惩罚吗？
+        # lin_vel = torch.sum(torch.square(self._robot.data.root_lin_vel_b), dim=1)
+        # ang_vel = torch.sum(torch.square(self._robot.data.root_ang_vel_b), dim=1)
 
-        # TODO: 重新思考抵达目标点+保持期望速度的奖励机制（比如可参考 “Extreme Parkour” 文章的内积设计）
-        distance_to_goal_mapped = 1 - torch.tanh(distance_to_goal / self.cfg.distance_goal_mapping_scale)
+        # # TODO: 重新思考抵达目标点+保持期望速度的奖励机制（比如可参考 “Extreme Parkour” 文章的内积设计）
+        # distance_to_goal_mapped = 1 - torch.tanh(distance_to_goal / reward_cfg.distance_goal_mapping_scale)
 
-        # Gather components - Updated to include separate velocity components
-        reward_components = torch.stack(
-            [
-                distance_reward * self.cfg.reward_coef_distance_reward,  # 0
-                yaw_direction_penalty * self.cfg.reward_coef_yaw_direction_penalty,  # 1
-                action_magnitude_penalty * self.cfg.reward_coef_action_magnitude_penalty,  # 2
-                action_change_penalty * self.cfg.reward_coef_action_change_penalty,  # 3
-                vel_direction_penalty * self.cfg.reward_coef_vel_direction_penalty,  # 4
-                vel_speed_excess_penalty * self.cfg.reward_coef_vel_speed_excess_penalty,  # 5
-                vel_speed_match_reward * self.cfg.reward_coef_vel_speed_match_reward,  # 6
-                z_position_penalty * self.cfg.reward_coef_z_position_penalty,  # 7
-                obstacle_collision_penalty * self.cfg.reward_coef_obstacle_collision_penalty,  # 8
-                esdf_reward * self.cfg.reward_coef_esdf_reward,  # 9
-                succeed_reward * self.cfg.reward_coef_succeed_reward,  # 10
-                max_ang_vel_penalty * self.cfg.reward_coef_max_ang_vel_penalty,  # 11
-                max_angle_penalty * self.cfg.reward_coef_max_angle_penalty,  # 12
-                alive_reward * self.cfg.reward_coef_alive_reward,  # 13
-                z_vel_penalty * self.cfg.reward_coef_z_vel_penalty,  # 14
-                lin_vel * self.cfg.reward_coef_lin_vel_reward_scale,  # 15
-                ang_vel * self.cfg.reward_coef_ang_vel_reward_scale,  # 16
-                distance_to_goal_mapped * self.cfg.reward_coef_distance_to_goal_reward_scale,  # 17
-            ],
-            dim=-1
-        )
-
-        total_reward = torch.sum(reward_components, dim=1)
-
-        # Define all reward components as (name, coefficient, value) tuples
-        reward_components = [
-            ("distance_reward", self.cfg.reward_coef_distance_reward, distance_reward),
-            ("yaw_direction_penalty", self.cfg.reward_coef_yaw_direction_penalty, yaw_direction_penalty),
-            ("action_magnitude_penalty", self.cfg.reward_coef_action_magnitude_penalty, action_magnitude_penalty),
-            ("action_change_penalty", self.cfg.reward_coef_action_change_penalty, action_change_penalty),
-            ("vel_direction_penalty", self.cfg.reward_coef_vel_direction_penalty, vel_direction_penalty),
-            ("vel_speed_excess_penalty", self.cfg.reward_coef_vel_speed_excess_penalty, vel_speed_excess_penalty),
-            ("vel_speed_match_reward", self.cfg.reward_coef_vel_speed_match_reward, vel_speed_match_reward),
-            ("z_position_penalty", self.cfg.reward_coef_z_position_penalty, z_position_penalty),
-            ("obstacle_collision_penalty", self.cfg.reward_coef_obstacle_collision_penalty, obstacle_collision_penalty),
-            ("esdf_reward", self.cfg.reward_coef_esdf_reward, esdf_reward),
-            ("succeed_reward", self.cfg.reward_coef_succeed_reward, succeed_reward),
-            ("max_ang_vel_penalty", self.cfg.reward_coef_max_ang_vel_penalty, max_ang_vel_penalty),
-            ("max_angle_penalty", self.cfg.reward_coef_max_angle_penalty, max_angle_penalty),
-            ("alive_reward", self.cfg.reward_coef_alive_reward, alive_reward),
-            ("z_vel_penalty", self.cfg.reward_coef_z_vel_penalty, z_vel_penalty),
-            ("lin_vel_reward", self.cfg.reward_coef_lin_vel_reward_scale, lin_vel),
-            ("ang_vel_reward", self.cfg.reward_coef_ang_vel_reward_scale, ang_vel),
-            ("distance_to_goal_reward", self.cfg.reward_coef_distance_to_goal_reward_scale, distance_to_goal_mapped),
+        # ----------------------------------------
+        # 计算总奖励，并记录各项奖励到日志
+        # ----------------------------------------
+        reward_specs = [
+            ("distance_reward",            distance_reward,            reward_cfg.coef_distance_reward),
+            ("yaw_direction_penalty",      yaw_direction_penalty,      reward_cfg.coef_yaw_direction_penalty),
+            ("action_magnitude_penalty",   action_magnitude_penalty,   reward_cfg.coef_action_magnitude_penalty),
+            ("action_change_penalty",      action_change_penalty,      reward_cfg.coef_action_change_penalty),
+            ("vel_direction_penalty",      vel_direction_penalty,      reward_cfg.coef_vel_direction_penalty),
+            ("vel_speed_excess_penalty",   vel_speed_excess_penalty,   reward_cfg.coef_vel_speed_excess_penalty),
+            ("vel_speed_match_reward",     vel_speed_match_reward,     reward_cfg.coef_vel_speed_match_reward),
+            ("z_position_penalty",         z_position_penalty,         reward_cfg.coef_z_position_penalty),
+            ("obstacle_collision_penalty", obstacle_collision_penalty, reward_cfg.coef_obstacle_collision_penalty),
+            ("esdf_reward",                esdf_reward,                reward_cfg.coef_esdf_reward),
+            ("succeed_reward",             succeed_reward,             reward_cfg.coef_succeed_reward),
+            ("max_ang_vel_penalty",        max_ang_vel_penalty,        reward_cfg.coef_max_ang_vel_penalty),
+            ("max_angle_penalty",          max_angle_penalty,          reward_cfg.coef_max_angle_penalty),
+            ("alive_reward",               alive_reward,               reward_cfg.coef_alive_reward),
+            ("z_vel_penalty",              z_vel_penalty,              reward_cfg.coef_z_vel_penalty),
+            # ("lin_vel_reward",             lin_vel,                    reward_cfg.coef_lin_vel_reward_scale),
+            # ("ang_vel_reward",             ang_vel,                    reward_cfg.coef_ang_vel_reward_scale),
+            # ("distance_to_goal_reward",    distance_to_goal_mapped,    reward_cfg.coef_distance_to_goal_reward_scale),
         ]
+        # 剔除权重为0的项
+        reward_specs = [(n, t, w) for (n, t, w) in reward_specs if w != 0.0]
+        # 提取各项奖励名称、原始数值和权重
+        names = [n for n, _, _ in reward_specs]
+        raw_terms = torch.stack([t for _, t, _ in reward_specs], dim=1)  # (N, K)
+        weights = raw_terms.new_tensor([w for _, _, w in reward_specs])  # (K,) 自动对齐 device/dtype
+        # 计算加权奖励、总和、均值
+        weighted_terms = raw_terms * weights        # (N, K)
+        reward_per_env = weighted_terms.sum(dim=1)  # (N,)
+        mean_weighted_terms = weighted_terms.mean(dim=0)  # (K,)
+        reward_env_mean   = reward_per_env.mean()         # scalar
+        # 记录到日志（skrl会自动处理无前缀 log name，加上 Info / 前缀）
+        self.extras["log"].update({f"{names[i]}": mean_weighted_terms[i] for i in range(len(names))})
+        self.extras["log"]["total"] = reward_env_mean
 
-        # Only include rewards with non-zero coefficients
-        log_dict = {name: (coef * value).mean() for name, coef, value in reward_components if coef != 0.0}
-        self.extras["log"] = log_dict
-
-        # Update "last" values
+        # ----------------------------------------
+        # 更新 “上一时刻” 数据
+        # ----------------------------------------
         self._last_pos_w.copy_(pos_w)
         self._last_actions.copy_(self._actions)
 
@@ -1813,44 +1645,88 @@ class QuadcopterEnv(DirectRLEnv):
         # torch.cuda.synchronize()
         # print(f"Reward compute time: {start.elapsed_time(end)} ms")
 
-        return total_reward
+        return reward_per_env
 
 
 
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         """Define terminations and timeouts."""
+
+        # -------------------------
+        # 计算各类结束条件
+        # -------------------------
+        # 计算回合超时的 env
         time_out = self.episode_length_buf >= self.max_episode_length - 1
 
-        # Check for physical collisions using contact sensor
-        net_contact_forces = self._contact_sensor.data.net_forces_w_history
-        selected_forces = torch.index_select(
-            net_contact_forces,
-            dim=2,
-            index=torch.tensor(self._undesired_contact_body_ids, device=self.device)
-        )
-        max_contact = torch.max(torch.norm(selected_forces, dim=-1), dim=1)[0]
-        is_contact = torch.sum(max_contact > self.cfg.contact_force_threshold, dim=1) > 0 # Threshold is important for REAL contact detection
-        self._is_contact = torch.logical_or(self._is_contact, is_contact)
+        # 计算发生碰撞的 env
+        net_forces = self._contact_sensor.data.net_forces_w_history  # (N, T, B, 3)
+        selected = net_forces[:, :, self._undesired_contact_ids, :]  # (N, T, K, 3)
+        max_contact, _ = torch.norm(selected, dim=-1).max(dim=1)     # (N, K)
+        self._is_contact = (max_contact > self.cfg.contact_force_threshold).any(dim=1)  # Threshold is important for REAL contact detection
 
-        # Goal reached
-        conditions = [
-            self._numerical_instability,  # Numerical instability
-            self._is_contact,  # Collision
-            self._is_success,  # Goal reached
-        ]
+        # -------------------------
+        # 计算总结束条件
+        # -------------------------
+        terminated_numerical = self._numerical_instability
+        # TODO: TEMPORARY DISABLE COLLISION TERMINATION
+        terminated_collision = self._is_contact
+        # terminated_collision = torch.zeros_like(self._is_contact)
+        terminated_success   = self._is_success
 
-        # Combine all die conditions (vectorized)
-        dones = torch.stack(conditions, dim=0).any(dim=0)
+        terminated = terminated_numerical | terminated_collision | terminated_success
 
-        # Initialize episode_status if not exists
-        if "episode_status" not in self.extras:
-            self.extras["episode_status"] = {}
-        self.extras["episode_status"]["died_mask"] = self._numerical_instability | self._is_contact
-        self.extras["episode_status"]["success_mask"] = self._is_success
-        self.extras["episode_status"]["timeout_mask"] = time_out
+        # -------------------------
+        # 记录回合结束原因到日志（本 step 内“将要结束”的 env 统计）
+        # -------------------------
+        # 构造互斥的结束原因（按优先级：success > collision > numerical > timeout）
+        end_success   = terminated_success
+        end_collision = terminated_collision & ~end_success
+        end_numerical = terminated_numerical & ~(end_success | end_collision)
+        end_timeout   = time_out & ~(end_success | end_collision | end_numerical)
+        end_total     = end_success | end_collision | end_numerical | end_timeout
+        # 计算统计量
+        end_total_count = end_total.sum().to(torch.float32)
+        zero = torch.zeros_like(end_total_count)
+        succ_ratio = torch.where(end_total_count > 0, end_success.float().sum() / end_total_count, zero)
+        collision_ratio = torch.where(end_total_count > 0, end_collision.float().sum() / end_total_count, zero)
+        numerical_ratio = torch.where(end_total_count > 0, end_numerical.float().sum() / end_total_count, zero)
+        timeout_ratio = torch.where(end_total_count > 0, end_timeout.float().sum() / end_total_count, zero)
+        # 记录到日志
+        self.extras["log"].update({
+            # count（数量）
+            "End / Total (count)"    : end_total_count,
+            "End / Success (count)"  : end_success.sum().to(torch.float32),
+            "End / Collision (count)": end_collision.sum().to(torch.float32),
+            "End / Numerical (count)": end_numerical.sum().to(torch.float32),
+            "End / Timeout (count)"  : end_timeout.sum().to(torch.float32),
+            # ratio（比例）
+            "End / Success (ratio)"  : succ_ratio,
+            "End / Collision (ratio)": collision_ratio,
+            "End / Numerical (ratio)": numerical_ratio,
+            "End / Timeout (ratio)"  : timeout_ratio,
+        })
 
-        return dones, time_out
+        # print("\n=== End End Statistics ===")
+        # print("Ended Episodes - Total: {}, Success: {}, Collision: {}, Numerical: {}, Timeout: {}\n".format(
+        #     end_total.sum().item(),
+        #     end_success.sum().item(),
+        #     end_collision.sum().item(),
+        #     end_numerical.sum().item(),
+        #     end_timeout.sum().item(),  
+        # ))
+        # print("Ended Episodes Ratio - Success: {:.2f}%, Collision: {:.2f}%, Numerical: {:.2f}%, Timeout: {:.2f}%\n".format(
+        #     succ_ratio.item() * 100,
+        #     collision_ratio.item() * 100,
+        #     numerical_ratio.item() * 100,
+        #     timeout_ratio.item() * 100,
+        # ))
+        
+        # self.extras["episode_status"]["died_mask"] = self._numerical_instability | self._is_contact
+        # self.extras["episode_status"]["success_mask"] = self._is_success
+        # self.extras["episode_status"]["timeout_mask"] = time_out
+
+        return terminated, time_out
 
 
 
@@ -1867,13 +1743,9 @@ class QuadcopterEnv(DirectRLEnv):
         # self._occ_collector.reset_env(env_ids.cpu())
 
 
-
-
         # TODO: 考虑抽象为多地图管理器对象
         # Always call regenerate terrain on reset to maintain map data
         self._regenerate_terrain()
-
-
 
 
         # TODO: 待测试并加入油门不确定度、风扰动
@@ -1912,24 +1784,17 @@ class QuadcopterEnv(DirectRLEnv):
         #     self._death_replay.reset_episode(env_ids)
 
 
-
-
         # TODO: 考虑抽象为回合评估统计对象
         # Update episode outcomes and metrics
         self._update_episode_outcomes_and_metrics(env_ids, success_mask, died_mask, timed_out_mask)
 
-
-
-
-        if "log" not in self.extras:
-            self.extras["log"] = dict()
 
         # Reset environment states
         self._robot.reset(env_ids)
         # Parent method sets done buffers, etc.
         super()._reset_idx(env_ids)
 
-        self._actions[env_ids] = torch.zeros(4, device=self.device)
+        # self._actions[env_ids] = torch.zeros(4, device=self.device)
 
         # Assign reset environments to the active map
         self._env_map_assignments[env_ids] = self._active_map_id
@@ -2056,14 +1921,14 @@ class QuadcopterEnv(DirectRLEnv):
 
 
 
-        # Reset the "last" references for rewards
+        # 重置 “上一时刻” 数据
         self._last_pos_w[env_ids] = default_root_state[:, :3]
         self._last_actions[env_ids] = torch.zeros(4, device=self.device)
-        self._is_contact[env_ids] = False
+
+        # 重置 done 相关标志
         self._numerical_instability[env_ids] = False
+        self._is_contact[env_ids] = False
         self._is_success[env_ids] = False
-
-
 
 
         # TODO: 待评估、测试并决定是否加入观测历史
@@ -2080,13 +1945,9 @@ class QuadcopterEnv(DirectRLEnv):
         #     self._height_randomizer.reset(env_ids, initial_positions)
 
 
-
-
         # TODO: 考虑抽象为回合评估统计对象
         # Reset episode outcome tracking for the reset environments
         self._episode_outcomes[env_ids] = 0
-
-
 
 
         # TODO: 待测试并加入死亡回放收集器
@@ -2257,34 +2118,29 @@ class QuadcopterEnv(DirectRLEnv):
         died_rate = died_count / total_episodes
         avg_final_distance = sum(self._final_distances) / len(self._final_distances) if self._final_distances else 0.0
 
-        # Update logs
-        if "log" not in self.extras:
-            self.extras["log"] = {}
-
         # Calculate goal queue statistics
         avg_goals_remaining = self._num_goals_remaining.float().mean().item()
         avg_goal_progress = (self.cfg.num_goals - avg_goals_remaining) / self.cfg.num_goals * 100.0
 
         self.extras["log"].update({
             # Episode termination statistics (as percentages)
-            "Metrics/success_rate": self._success_rate * 100.0,
-            "Metrics/died_rate": died_rate * 100.0,
-            "Metrics/time_out_rate": timeout_count / total_episodes * 100.0,
+            "Metrics / success_rate": self._success_rate * 100.0,
+            "Metrics / died_rate": died_rate * 100.0,
+            "Metrics / time_out_rate": timeout_count / total_episodes * 100.0,
 
             # died reason statistics (as percentages of total episodes)
-            "Metrics/Died/numerical_instability": termination_counts["numerical_instability"] * died_rate / total_episodes * 100.0,
-            "Metrics/Died/collision": termination_counts["collision"] * died_rate / total_episodes * 100.0,
-            "Metrics/Died/too_low": termination_counts["too_low"] * died_rate / total_episodes * 100.0,
-            "Metrics/Died/too_high": termination_counts["too_high"] * died_rate / total_episodes * 100.0,
+            "Metrics / Died / numerical_instability": termination_counts["numerical_instability"] * died_rate / total_episodes * 100.0,
+            "Metrics / Died / collision": termination_counts["collision"] * died_rate / total_episodes * 100.0,
+            "Metrics / Died / too_low": termination_counts["too_low"] * died_rate / total_episodes * 100.0,
+            "Metrics / Died / too_high": termination_counts["too_high"] * died_rate / total_episodes * 100.0,
 
             # Performance tracking
-            "Metrics/final_distance_to_goal": avg_final_distance,
-
+            "Metrics / final_distance_to_goal": avg_final_distance,
             # Goal queue tracking
-            "Metrics/avg_goals_remaining": avg_goals_remaining,
-            "Metrics/avg_goal_progress_percent": avg_goal_progress,
+            "Metrics / avg_goals_remaining": avg_goals_remaining,
+            "Metrics / avg_goal_progress_percent": avg_goal_progress,
 
             # Environment configuration
-            "Metrics/obstacle_min_distance": self.cfg.obstacle_min_distance_init,
-            "Metrics/hover_hold_requirement_s": float(self._hover_hold_requirement_s),
+            "Metrics / obstacle_min_distance": self.cfg.obstacle_min_distance_init,
+            "Metrics / hover_hold_requirement_s": float(self._hover_hold_requirement_s),
         })
