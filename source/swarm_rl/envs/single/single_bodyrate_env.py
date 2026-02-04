@@ -46,6 +46,9 @@ import collections
 import itertools
 
 
+import isaaclab.sim as sim_utils
+from isaaclab.markers.visualization_markers import VisualizationMarkersCfg
+
 
 from swarm_rl.utils.controller import bodyrate_control_without_thrust
 from swarm_rl.utils.depth_camera_array import DepthCameraItemCfg, DepthCameraArray, DepthCameraArrayCfg
@@ -237,7 +240,7 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
     observation_space   = 3 + 9 + 3 + 1 + 4 + 32*16         # obs-policy: [gyro + rot + goal + speed + actions + depth]
     state_space         = observation_space + 3 + 3 + 3     # obs-critic: [gyro + rot + goal + speed + actions + depth + vel + goal_dir + obstacle_pos]
 
-    debug_vis           = True  # debug 可视化
+    debug_vis           = False  # debug 可视化
 
     # # Action delay configuration
     # action_delay_steps = 4  # action_delay_steps = delay time / self.cfg.sim.dt
@@ -603,9 +606,9 @@ class QuadcopterEnv(DirectRLEnv):
         self._actions       = torch.zeros(self.num_envs, self.cfg.action_space, device=self.device) # [thrust, bodyrate(x, y, z)]
         self._last_actions  = torch.zeros(self.num_envs, self.cfg.action_space, device=self.device) # [thrust, bodyrate(x, y, z)]
         # 低层控制量
-        self._thrust_max    = self.cfg.thrust_weight_ratio * self.cfg.robot_mass * 9.81 # 最大推力 (推重比 * M * g)
-        self._bodyrate_max  = self.cfg.bodyrate_max                                     # 最大角速度
-        self._thrust_desired    = torch.zeros(self.num_envs, 1, device=self.device) # 策略 action 映射到的期望油门
+        self._thrust_max    = self.cfg.thrust_weight_ratio * self.cfg.robot_mass * 9.81 # 最大推力 (推重比 * M * g) (N)
+        self._bodyrate_max  = self.cfg.bodyrate_max                                     # 最大角速度 (rad/s)
+        self._thrust_desired    = torch.zeros(self.num_envs, 1, device=self.device) # 策略 action 映射到的期望推力
         self._bodyrate_desired  = torch.zeros(self.num_envs, 3, device=self.device) # 策略 action 映射到的期望角速度 (x, y, z)
         self._forces    = torch.zeros(self.num_envs, 1, 3, device=self.device)  # 控制器计算出的控制力
         self._torques   = torch.zeros(self.num_envs, 1, 3, device=self.device)  # 控制器计算出的控制力矩
@@ -639,7 +642,6 @@ class QuadcopterEnv(DirectRLEnv):
         self._undesired_contact_ids = torch.tensor(contact_ids, dtype=torch.long, device=self.device)
 
 
-
         # TODO: 待评估、测试并决定是否加入观测历史
         # # Observations
         # self._obs_history = torch.zeros(self.num_envs, self.cfg.history_length, self.cfg.frame_observation_space, device=self.device)
@@ -667,6 +669,7 @@ class QuadcopterEnv(DirectRLEnv):
         # Legacy variables for compatibility
         self.occ_kdtree = None
         self.free_points = np.array([[0, 0, 0]], dtype=np.float32)
+        self._closest_points = torch.zeros(self.num_envs, 3, device=self.device)
 
 
         # TODO: 待测试并加入 noise
@@ -1262,8 +1265,8 @@ class QuadcopterEnv(DirectRLEnv):
         
         # 计算相对于最近障碍物的位移（来自全局点云的 KD-tree；限制最大距离，保持方向不变）
         _, indices = self.occ_kdtree.query(pos_w.cpu().numpy(), workers=-1)
-        closest_points = torch.tensor(self.occ_kdtree.data[indices], device=self.device, dtype=pos_w.dtype)
-        pos_to_obstacle = closest_points - pos_w
+        self._closest_points = torch.tensor(self.occ_kdtree.data[indices], device=self.device, dtype=pos_w.dtype)
+        pos_to_obstacle = self._closest_points - pos_w
         eps = 1e-6
         if pos_to_obstacle.dtype in (torch.float16, torch.bfloat16):
             eps = 1e-3
@@ -1994,6 +1997,22 @@ class QuadcopterEnv(DirectRLEnv):
                 print("Created current_yaw_visualizer")
             # set their visibility to true
             self.current_yaw_visualizer.set_visibility(True)
+
+            if not hasattr(self, "closest_points_visualizer"):
+                marker_cfg = VisualizationMarkersCfg(
+                    prim_path="/Visuals/State/closest_points",
+                    markers={
+                        "closest_point": sim_utils.SphereCfg(
+                            radius=0.05,
+                            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 1.0, 1.0)),
+                        ),
+                    },
+                )
+                # -- closest points
+                self.closest_points_visualizer = VisualizationMarkers(marker_cfg)
+                print("Created closest_points_visualizer")
+            # set their visibility to true
+            self.closest_points_visualizer.set_visibility(True)
         else:
             if hasattr(self, "goal_pos_visualizer"):
                 self.goal_pos_visualizer.set_visibility(False)
@@ -2001,6 +2020,8 @@ class QuadcopterEnv(DirectRLEnv):
                 self.goal_yaw_visualizer.set_visibility(False)
             if hasattr(self, "current_yaw_visualizer"):
                 self.current_yaw_visualizer.set_visibility(False)
+            # if hasattr(self, "closest_points_visualizer"):
+            #     self.closest_points_visualizer.set_visibility(False)
 
 
 
@@ -2010,6 +2031,7 @@ class QuadcopterEnv(DirectRLEnv):
         self.goal_pos_visualizer.visualize(self._desired_pos_w)
         self.goal_yaw_visualizer.visualize(self._desired_pos_w, self._desired_yaw_quat)
         self.current_yaw_visualizer.visualize(self._robot.data.root_pos_w, self._robot.data.root_quat_w)
+        self.closest_points_visualizer.visualize(self._closest_points)
 
 
 
