@@ -73,7 +73,7 @@ import skrl
 from packaging import version
 
 # Check for minimum supported skrl version
-SKRL_VERSION = "1.4.2"
+SKRL_VERSION = "2.0.0"
 if version.parse(skrl.__version__) < version.parse(SKRL_VERSION):
     skrl.logger.error(f"Unsupported skrl version: {skrl.__version__}. " f"Install supported version using 'pip install skrl>={SKRL_VERSION}'")
     exit()
@@ -188,7 +188,7 @@ def main(env_cfg: DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: dict):
 
     # Configure and instantiate the skrl runner
     # https://skrl.readthedocs.io/en/latest/api/utils/runner.html
-    runner = Runner(env, agent_cfg)
+    runner = Runner(env, agent_cfg, verbose=True)
 
     resume_path = retrieve_file_path(args_cli.checkpoint) if args_cli.checkpoint else None
     if resume_path:

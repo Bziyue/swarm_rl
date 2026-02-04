@@ -227,20 +227,99 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
     # blind_imu = False
     # blind_imu_from_step = 50  # freeze logged quat/lin_vel/ang_vel after this many steps
 
+
+    # depth_cameras: DepthCameraArrayCfg = DepthCameraArrayCfg(
+    #     cameras = [
+    #         DepthCameraItemCfg(name="front", pos_BC=( 0.02,  0.0,  0.0), quat_BC=(1.0, 0.0, 0.0, 0.0), ),
+    #         DepthCameraItemCfg(name="right", pos_BC=( 0.0,  -0.02, 0.0), quat_BC=(0.70710678, 0.0, 0.0, 0.70710678), ),
+    #         DepthCameraItemCfg(name="back",  pos_BC=(-0.02,  0.0,  0.0), quat_BC=(0.0, 0.0, 0.0, 1.0), ),
+    #         DepthCameraItemCfg(name="left",  pos_BC=( 0.0,   0.02, 0.0), quat_BC=(0.70710678, 0.0, 0.0, -0.70710678), ),
+    #     ],
+
+    #     # 广播字段：写一次默认所有相机通用
+    #     resolution=(96, 72),     # (W, H)
+    #     K=[388.963/(640/96), 0.0,              317.04/(640/96),
+    #        0.0,              388.963/(480/72), 241.99/(480/72),
+    #        0.0,              0.0,              1.0,],
+
+    #     prim_path = "/World/envs/env_.*/Robot/body",
+    #     mesh_prim_paths = ["/map_mesh"],
+    #     max_distance = 4.0,
+    #     depth_clipping_behavior = "max",
+    #     data_type = "distance_to_image_plane",
+    #     update_period = 0.0,
+    #     debug_vis = False,
+
+    #     usd_focal_length=24.0,
+        
+    #     normalize = "0_1",      # 或 "none" / "-1_1"
+    #     flatten = False,
+
+    #     invalid_rate_max = 0.15,
+    #     invalid_sampling = "per_frame",
+    #     invalid_fill_value = "max_distance",
+    # )
+    image_width: int = 120
+    image_height: int = 96
+    camera_num: int = 4
+    depth_cameras: DepthCameraArrayCfg = DepthCameraArrayCfg(
+        cameras = [
+            DepthCameraItemCfg(name="front", pos_BC=( 0.02,  0.0,  0.0), quat_BC=(1.0, 0.0, 0.0, 0.0), ),
+            DepthCameraItemCfg(name="right", pos_BC=( 0.0,  -0.02, 0.0), quat_BC=(0.70710678, 0.0, 0.0, -0.70710678), ),
+            DepthCameraItemCfg(name="back",  pos_BC=(-0.02,  0.0,  0.0), quat_BC=(0.0, 0.0, 0.0, 1.0), ),
+            DepthCameraItemCfg(name="left",  pos_BC=( 0.0,   0.02, 0.0), quat_BC=(0.70710678, 0.0, 0.0, 0.70710678), ),
+        ],
+
+        # 广播字段：写一次默认所有相机通用
+        resolution=(image_width, image_height),     # (W, H)
+        K=[388.963/(640/image_width), 0.0,             317.04/(640/image_width),
+           0.0,              388.963/(480/image_height), 241.99/(480/image_height),
+           0.0,              0.0,              1.0,],
+
+        prim_path = "/World/envs/env_.*/Robot/body",
+        mesh_prim_paths = ["/map_mesh"],
+        max_distance = 4.0,
+        depth_clipping_behavior = "max",
+        data_type = "distance_to_image_plane",
+        update_period = 0.0,
+        debug_vis = False,
+
+        usd_focal_length=24.0,
+        
+        normalize = "0_1",      # 或 "none" / "-1_1"
+        flatten = False,
+
+        invalid_rate_max = 0.15,
+        invalid_sampling = "per_frame",
+        invalid_fill_value = "max_distance",
+    )
+
     # ========================================================================
     # Environment Timing Configuration
     # ========================================================================
 
     # Environment timing
-    episode_length_s    = 80 * num_goals  # seconds
-    step_freq           = 15  # Hz
-    decimation          = 10
+    episode_length_s = 80 * num_goals  # seconds
+    step_freq        = 15     # Hz
+    decimation       = 10
 
-    action_space        = 1 + 3                             # action: [thrust, bodyrate(x, y, z)]
-    observation_space   = 3 + 9 + 3 + 1 + 4 + 32*16         # obs-policy: [gyro + rot + goal + speed + actions + depth]
-    state_space         = observation_space + 3 + 3 + 3     # obs-critic: [gyro + rot + goal + speed + actions + depth + vel + goal_dir + obstacle_pos]
+    action_space     = 1 + 3  # action: [thrust, bodyrate(x, y, z)]
+    # obs-policy
+    observation_space = gym.spaces.Dict({
+        "image": gym.spaces.Box(low=-float("inf"), high=float("inf"), shape=(1, image_height, image_width * camera_num), dtype="float32"),
+        # [gyro + rot + goal + speed + actions]
+        "state": gym.spaces.Box(low=-float("inf"), high=float("inf"), shape=(20,), dtype="float32"),
+    })
+    # obs-critic
+    state_space = ({
+        "image": gym.spaces.Box(low=-float("inf"), high=float("inf"), shape=(1, image_height, image_width * camera_num), dtype="float32"),
+        # [gyro + rot + goal + speed + actions + vel + goal_dir + obstacle_pos]
+        "state": gym.spaces.Box(low=-float("inf"), high=float("inf"), shape=(29,), dtype="float32"),
+    })
+    # observation_space   = 3 + 9 + 3 + 1 + 4 + 32*16         # obs-policy: [gyro + rot + goal + speed + actions + depth]
+    # state_space         = observation_space + 3 + 3 + 3     # obs-critic: [gyro + rot + goal + speed + actions + depth + vel + goal_dir + obstacle_pos]
 
-    debug_vis           = False  # debug 可视化
+    debug_vis = False  # debug 可视化
 
     # # Action delay configuration
     # action_delay_steps = 4  # action_delay_steps = delay time / self.cfg.sim.dt
@@ -360,68 +439,6 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
     )
     contact_force_threshold = 0.01  # Minimum contact force for collision detection
 
-    # depth_cameras: DepthCameraArrayCfg = DepthCameraArrayCfg(
-    #     cameras = [
-    #         DepthCameraItemCfg(name="front", pos_BC=( 0.02,  0.0,  0.0), quat_BC=(1.0, 0.0, 0.0, 0.0), ),
-    #         DepthCameraItemCfg(name="right", pos_BC=( 0.0,  -0.02, 0.0), quat_BC=(0.70710678, 0.0, 0.0, 0.70710678), ),
-    #         DepthCameraItemCfg(name="back",  pos_BC=(-0.02,  0.0,  0.0), quat_BC=(0.0, 0.0, 0.0, 1.0), ),
-    #         DepthCameraItemCfg(name="left",  pos_BC=( 0.0,   0.02, 0.0), quat_BC=(0.70710678, 0.0, 0.0, -0.70710678), ),
-    #     ],
-
-    #     # 广播字段：写一次默认所有相机通用
-    #     resolution=(96, 72),     # (W, H)
-    #     K=[388.963/(640/96), 0.0,              317.04/(640/96),
-    #        0.0,              388.963/(480/72), 241.99/(480/72),
-    #        0.0,              0.0,              1.0,],
-
-    #     prim_path = "/World/envs/env_.*/Robot/body",
-    #     mesh_prim_paths = ["/map_mesh"],
-    #     max_distance = 4.0,
-    #     depth_clipping_behavior = "max",
-    #     data_type = "distance_to_image_plane",
-    #     update_period = 0.0,
-    #     debug_vis = False,
-
-    #     usd_focal_length=24.0,
-        
-    #     normalize = "0_1",      # 或 "none" / "-1_1"
-    #     flatten = False,
-
-    #     invalid_rate_max = 0.15,
-    #     invalid_sampling = "per_frame",
-    #     invalid_fill_value = "max_distance",
-    # )
-    depth_cameras: DepthCameraArrayCfg = DepthCameraArrayCfg(
-        cameras = [
-            DepthCameraItemCfg(name="front", pos_BC=( 0.02,  0.0,  0.0), quat_BC=(1.0, 0.0, 0.0, 0.0), ),
-            DepthCameraItemCfg(name="right", pos_BC=( 0.0,  -0.02, 0.0), quat_BC=(0.70710678, 0.0, 0.0, -0.70710678), ),
-            DepthCameraItemCfg(name="back",  pos_BC=(-0.02,  0.0,  0.0), quat_BC=(0.0, 0.0, 0.0, 1.0), ),
-            DepthCameraItemCfg(name="left",  pos_BC=( 0.0,   0.02, 0.0), quat_BC=(0.70710678, 0.0, 0.0, 0.70710678), ),
-        ],
-
-        # 广播字段：写一次默认所有相机通用
-        resolution=(32, 16),     # (W, H)
-        K=[388.963/(640/32), 0.0,              317.04/(640/32),
-           0.0,              388.963/(480/16), 241.99/(480/16),
-           0.0,              0.0,              1.0,],
-
-        prim_path = "/World/envs/env_.*/Robot/body",
-        mesh_prim_paths = ["/map_mesh"],
-        max_distance = 4.0,
-        depth_clipping_behavior = "max",
-        data_type = "distance_to_image_plane",
-        update_period = 0.0,
-        debug_vis = False,
-
-        usd_focal_length=24.0,
-        
-        normalize = "0_1",      # 或 "none" / "-1_1"
-        flatten = False,
-
-        invalid_rate_max = 0.15,
-        invalid_sampling = "per_frame",
-        invalid_fill_value = "max_distance",
-    )
 
     # TODO: 待评估、测试并决定是否加入观测历史
     # # Calculate total observation space with history
@@ -1121,17 +1138,19 @@ class QuadcopterEnv(DirectRLEnv):
         max_d = self.cfg.depth_cameras.max_distance
         depth_image_list = self._depth_cameras.read_batch()
 
-        depth_image = depth_image_list[0].flatten(start_dim=1) / max_d  # Normalize to [0, 1]
-        # print(depth_image_list[0].shape)
-        # print(depth_image.shape)
+        # 深度图像 (TODO: 待加入噪声)
+        # # (N, C, H, W) Normalize to [0, 1] and scale
+        # image_noised = image_raw = torch.stack(depth_image_list, dim=1) / max_d * obs_cfg.depth_image_scale
+        image_noised = image_raw = torch.cat(depth_image_list, dim=2).unsqueeze(1) / max_d * obs_cfg.depth_image_scale
+        # print(image_raw.shape)
 
         # TODO: 待加入多相机类中
-        # Debug: visualize depth images
+        # # Debug: visualize depth images
         # depth_image_cat = torch.cat(depth_image_list, dim=2)
         # depth_image_cat = depth_image_cat[0].squeeze(-1)
         # H, W = depth_image_cat.shape
         # depth_image_cat_u8 = torch.clamp((depth_image_cat / max_d * 255.0), 0, 255).to(torch.uint8)
-        # scale = 32
+        # scale = 6
         # new_w = max(1, int(W * scale))
         # new_h = max(1, int(H * scale))
         # img_big = cv2.resize(depth_image_cat_u8.cpu().numpy(), (new_w, new_h), interpolation=cv2.INTER_NEAREST)
@@ -1302,7 +1321,6 @@ class QuadcopterEnv(DirectRLEnv):
                 (self._desired_speed) * obs_cfg.desired_speed_scale,   # 期望速度
                 goal_feat             * obs_cfg.goal_feat_scale,       # 目标点特征 [dir_x, dir_y, z_err] (TODO: z_err scale 能否与 dir_xy 相同?)
                 self._last_actions    * obs_cfg.last_action_scale,     # 上一步 action [thrust, bodyrate(x, y, z)]
-                depth_image           * obs_cfg.depth_image_scale,     # 深度图像 (TODO: 待加入噪声)
             ],
             dim=-1,
         )
@@ -1334,7 +1352,6 @@ class QuadcopterEnv(DirectRLEnv):
                 (self._desired_speed) * obs_cfg.desired_speed_scale,   # 期望速度
                 goal_feat             * obs_cfg.goal_feat_scale,       # 目标点特征 [dir_x, dir_y, z_err] (TODO: z_err scale 能否与 dir_xy 相同?)
                 self._last_actions    * obs_cfg.last_action_scale,     # 上一步 action [thrust, bodyrate(x, y, z)]
-                depth_image           * obs_cfg.depth_image_scale,     # 深度图像 (noise-free)
 
                 # 特权观测
                 lin_vel_b             * obs_cfg.lin_vel_scale,         # 线速度（body系）[vx, vy, vz]
@@ -1366,7 +1383,10 @@ class QuadcopterEnv(DirectRLEnv):
         # return {"policy": policy_obs_final, "critic": critic_obs_final}
 
 
-        return {"policy": policy_obs, "critic": critic_obs}
+        return {
+            "policy": {"image": image_noised, "state": policy_obs},
+            "critic": {"image": image_raw,    "state": critic_obs},
+        }
 
 
 
