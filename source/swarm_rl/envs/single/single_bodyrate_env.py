@@ -259,8 +259,8 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
     #     invalid_sampling = "per_frame",
     #     invalid_fill_value = "max_distance",
     # )
-    image_width: int = 120
-    image_height: int = 96
+    image_width: int = 64
+    image_height: int = 32
     camera_num: int = 4
     depth_cameras: DepthCameraArrayCfg = DepthCameraArrayCfg(
         cameras = [
