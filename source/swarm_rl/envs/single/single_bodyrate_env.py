@@ -136,8 +136,8 @@ class QuadcopterRewardCfg:
     """Configuration for quadcopter reward."""
     
     # reward 权重
-    coef_distance_reward: float             = 1000.0
-    coef_yaw_direction_penalty: float       = 0.3
+    coef_distance_reward: float             = 5.0
+    coef_yaw_direction_penalty: float       = 0.0
     coef_action_magnitude_penalty: float    = 0.0
     coef_action_change_penalty: float       = 0.1
     coef_vel_direction_penalty: float       = 0.15
@@ -149,7 +149,7 @@ class QuadcopterRewardCfg:
     coef_succeed_reward: float              = 200.0
     coef_max_ang_vel_penalty: float         = 0.0
     coef_max_angle_penalty: float           = 0.0
-    coef_alive_reward: float                = 0.5
+    coef_alive_reward: float                = 0.0
     coef_z_vel_penalty: float               = 0.0
     # # Position control rewards
     # coef_lin_vel_reward_scale: float = 0
@@ -157,13 +157,14 @@ class QuadcopterRewardCfg:
     # coef_distance_to_goal_reward_scale: float = 0
 
     # reward 计算参数
+    delta_distance_clamp: float         = 3.0 / 15.0   # 接近目标速率奖励的上下界 (3m/s / 15hz)
     # distance_goal_mapping_scale = 0.8   # Scale factor for distance-to-goal mapping
-    speed_adjustment_distance = 1.0     # Distance to start speed adjustment
-    z_position_huber_delta = 0.3        # Transition point between quadratic and linear z penalty
-    vel_direction_huber_delta = 0.2     # Transition point for velocity direction Huber penalty
+    speed_adjustment_distance: float    = 1.0           # Distance to start speed adjustment
+    z_position_huber_delta: float       = 0.3           # Transition point between quadratic and linear z penalty
+    vel_direction_huber_delta: float    = 0.2           # Transition point for velocity direction Huber penalty
 
-    max_angular_velocity_penalty = 3.14 / 4.0   # rad/s for penalty
-    max_angle_penalty = 3.14 / 4.0              # rad for angle penalty
+    max_angular_velocity_penalty: float = 3.14 / 4.0    # rad/s for penalty
+    max_angle_penalty: float = 3.14 / 4.0               # rad for angle penalty
 
 
 @configclass
@@ -370,7 +371,7 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
     robot_mass = 1.0  # kg
     robot_inertia = [6.8e-4, 4.8e-4, 8.5e-4]  # kg*m^2 [Ixx, Iyy, Izz]
 
-    thrust_weight_ratio = 4.0   # 推重比（thrust_max = thrust_weight_ratio * robot_mass）
+    thrust_weight_ratio = 4.0   # 推重比（thrust_max = thrust_weight_ratio * robot_mass * 9.81）
     bodyrate_max = 6.0          # 最大角速度
 
     # Mass randomization configuration
@@ -378,7 +379,7 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
     mass_randomization_percent = 0.2  # +/- percentage of mass randomization
 
     # Range of desired velocities in m/s
-    des_vel_range = [0.5, 1.5]  # [min, max]
+    des_vel_range = [6.0, 6.0]  # [min, max]
 
     # ========================================================================
     # Environmental Effects Configuration
@@ -488,12 +489,12 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
         if self.curriculum_stage == "yaw_alignment":
             self.scene.num_envs = 45000
             self.spawn_mode = "edges"  # Spawn from edges for yaw alignment stage
-            self.reward.coef_distance_reward = 0.0
-            self.reward.coef_z_position_penalty = 0.0
+            # self.reward.coef_distance_reward = 0.0
+            # self.reward.coef_z_position_penalty = 0.0
         elif self.curriculum_stage == "static_goals":
             self.scene.num_envs = 26000
-            self.reward.coef_distance_reward = 80.0
-            self.reward.coef_z_position_penalty = 0.25
+            # self.reward.coef_distance_reward = 80.0
+            # self.reward.coef_z_position_penalty = 0.25
             
 
 
@@ -1412,11 +1413,11 @@ class QuadcopterEnv(DirectRLEnv):
         # 计算每项奖励和惩罚
         # ----------------------------------------
         # TODO: 重新思考抵达目标点+保持期望速度的奖励机制（比如可参考 “Extreme Parkour” 文章的内积设计）
-        # distance to goal center [-0.01, 0.01] (1m/s / 100steps)
+        # distance to goal center
         distance_to_gap = (pos_w - self._desired_pos_w).norm(dim=1)
         last_distance_to_gap = (self._last_pos_w - self._desired_pos_w).norm(dim=1)
         delta_distance = last_distance_to_gap - distance_to_gap
-        distance_reward = torch.clamp_max(delta_distance, max=0.01)
+        distance_reward = torch.clamp(delta_distance / reward_cfg.delta_distance_clamp, min=-1.0, max=1.0)
 
         # TODO: 重新思考抵达目标点+保持期望速度的奖励机制（比如可参考 “Extreme Parkour” 文章的内积设计）
         # direction penalty [-2, 0]
