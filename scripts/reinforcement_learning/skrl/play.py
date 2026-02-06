@@ -78,7 +78,7 @@ import skrl
 from packaging import version
 
 # Check for minimum supported skrl version
-SKRL_VERSION = "1.4.2"
+SKRL_VERSION = "2.0.0"
 if version.parse(skrl.__version__) < version.parse(SKRL_VERSION):
     skrl.logger.error(f"Unsupported skrl version: {skrl.__version__}. " f"Install supported version using 'pip install skrl>={SKRL_VERSION}'")
     exit()
@@ -146,16 +146,18 @@ def main():
     experiment_cfg["trainer"]["close_environment_at_exit"] = False
     experiment_cfg["agent"]["experiment"]["write_interval"] = 0  # Don't log to TensorBoard
     experiment_cfg["agent"]["experiment"]["checkpoint_interval"] = 0  # Don't generate checkpoints
-    runner = Runner(env, experiment_cfg)
+    runner = Runner(env, experiment_cfg, verbose=True)
 
     runner.agent.load(checkpoint_path)
     # Set agent to evaluation mode
-    runner.agent.set_running_mode("eval")
+    # ✅ 新代码 (新版写法)
+    runner.agent.enable_models_training_mode(False)
 
     dt = env.unwrapped.step_dt
 
     # Reset environment
     obs, _ = env.reset()
+    states = env.state()
     # Simulate environment
     while simulation_app.is_running():
         start_time = time.time()
@@ -163,7 +165,7 @@ def main():
         # Run everything in inference mode
         with torch.inference_mode():
             # Agent stepping
-            outputs = runner.agent.act(obs, timestep=0, timesteps=0)
+            outputs = runner.agent.act(obs, states, timestep=0, timesteps=0)
             # Multi-agent (deterministic) actions
             if hasattr(env, "possible_agents"):
                 actions = {a: outputs[-1][a].get("mean_actions", outputs[0][a]) for a in env.possible_agents}
@@ -172,6 +174,7 @@ def main():
                 actions = outputs[-1].get("mean_actions", outputs[0])
             # Env stepping
             obs, _, _, _, _ = env.step(actions)
+            states = env.state()
 
         # Time delay for real-time evaluation
         sleep_time = dt - (time.time() - start_time)

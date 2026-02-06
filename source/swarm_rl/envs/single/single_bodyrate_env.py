@@ -529,7 +529,7 @@ class QuadcopterEnv(DirectRLEnv):
     def __init__(self, cfg: QuadcopterEnvCfg, render_mode: str | None = None, **kwargs):
 
         super().__init__(cfg, render_mode, **kwargs)
-        self.render_mode = "human"
+
         self.extras["log"] = dict() # 初始化日志字典
 
 
@@ -866,10 +866,6 @@ class QuadcopterEnv(DirectRLEnv):
             activate_contact_sensors("/World", threshold=1.0)
             self._contact_sensor = ContactSensor(self.cfg.contact_sensor)
             self.scene.sensors["contact_sensor"] = self._contact_sensor
-
-        # Simulation settings
-        # NO_RENDERING = 0, PARTIAL_RENDERING = 1, FULL_RENDERING = 2, NO_GUI_OR_RENDERING = -1
-        self.sim.set_render_mode(SimulationContext.RenderMode.NO_RENDERING)
 
 
         # TODO: 考虑抽象为多地图管理器对象
