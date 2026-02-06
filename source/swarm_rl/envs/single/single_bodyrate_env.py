@@ -100,6 +100,26 @@ from swarm_rl.utils.quadcopter import DJI_FPV_CFG
 #     depth_invalid_rate_max = 0.15  # Maximum rate of invalid depth readings
 
 
+class QuadcopterEnvWindow(BaseEnvWindow):
+    """Window manager for the Quadcopter environment."""
+
+    def __init__(self, env: QuadcopterEnv, window_name: str = "IsaacLab"):
+        """Initialize the window.
+
+        Args:
+            env: The environment object.
+            window_name: The name of the window. Defaults to "IsaacLab".
+        """
+        # initialize base window
+        super().__init__(env, window_name)
+        # add custom UI elements
+        with self.ui_window_elements["main_vstack"]:
+            with self.ui_window_elements["debug_frame"]:
+                with self.ui_window_elements["debug_vstack"]:
+                    # add command manager visualization
+                    self._create_debug_vis_ui_element("targets", self.env)
+
+
 @configclass
 class QuadcopterSceneCfg(InteractiveSceneCfg):
     """Configuration for the Quadcopter scene."""
@@ -320,8 +340,6 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
     # observation_space   = 3 + 9 + 3 + 1 + 4 + 32*16         # obs-policy: [gyro + rot + goal + speed + actions + depth]
     # state_space         = observation_space + 3 + 3 + 3     # obs-critic: [gyro + rot + goal + speed + actions + depth + vel + goal_dir + obstacle_pos]
 
-    debug_vis = False  # debug 可视化
-
     # # Action delay configuration
     # action_delay_steps = 4  # action_delay_steps = delay time / self.cfg.sim.dt
 
@@ -348,6 +366,8 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
             dlss_mode=2,
         )
     )
+
+    ui_window_class_type = QuadcopterEnvWindow
 
     # ========================================================================
     # Controller Configuration
@@ -495,28 +515,6 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
             self.scene.num_envs = 26000
             # self.reward.coef_distance_reward = 80.0
             # self.reward.coef_z_position_penalty = 0.25
-            
-
-
-# TODO: 待评估窗口管理是什么作用
-# class QuadcopterEnvWindow(BaseEnvWindow):
-#     """Window manager for the Quadcopter environment."""
-
-#     def __init__(self, env: QuadcopterEnv, window_name: str = "IsaacLab"):
-#         """Initialize the window.
-
-#         Args:
-#             env: The environment object.
-#             window_name: The name of the window. Defaults to "IsaacLab".
-#         """
-#         # initialize base window
-#         super().__init__(env, window_name)
-#         # add custom UI elements
-#         with self.ui_window_elements["main_vstack"]:
-#             with self.ui_window_elements["debug_frame"]:
-#                 with self.ui_window_elements["debug_vstack"]:
-#                     # add command manager visualization
-#                     self._create_debug_vis_ui_element("targets", self.env)
 
 
 
@@ -527,7 +525,6 @@ class QuadcopterEnv(DirectRLEnv):
     cfg: QuadcopterEnvCfg
 
     def __init__(self, cfg: QuadcopterEnvCfg, render_mode: str | None = None, **kwargs):
-
         super().__init__(cfg, render_mode, **kwargs)
 
         self.extras["log"] = dict() # 初始化日志字典
@@ -729,9 +726,6 @@ class QuadcopterEnv(DirectRLEnv):
         # TODO: 可以抽象为目标管理对象
         self._hover_hold_counter_s = torch.zeros(self.num_envs, device=self.device)
         self._hover_hold_requirement_s = self.cfg.hover_hold_initial_s
-
-
-        self.set_debug_vis(self.cfg.debug_vis)
 
 
 
@@ -2037,8 +2031,8 @@ class QuadcopterEnv(DirectRLEnv):
                 self.goal_yaw_visualizer.set_visibility(False)
             if hasattr(self, "current_yaw_visualizer"):
                 self.current_yaw_visualizer.set_visibility(False)
-            # if hasattr(self, "closest_points_visualizer"):
-            #     self.closest_points_visualizer.set_visibility(False)
+            if hasattr(self, "closest_points_visualizer"):
+                self.closest_points_visualizer.set_visibility(False)
 
 
 
