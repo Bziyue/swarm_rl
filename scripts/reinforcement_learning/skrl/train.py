@@ -166,10 +166,10 @@ def main(env_cfg: DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: dict):
     dump_yaml(os.path.join(log_dir, "params", "agent.yaml"), agent_cfg)
     os.chmod(os.path.join(log_dir, "params", "agent.yaml"), 0o444)
 
-    dump_env_src_dir = os.path.join(log_dir, "src")
-    copy_env_source(env_cfg, dump_env_src_dir)
-
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
+
+    dump_env_src_dir = os.path.join(log_dir, "src")
+    copy_env_source(env, dump_env_src_dir)
 
     if isinstance(env.unwrapped, DirectMARLEnv) and algorithm in ["ppo"]:
         env = multi_agent_to_single_agent(env)

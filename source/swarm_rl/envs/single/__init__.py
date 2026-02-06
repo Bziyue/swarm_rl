@@ -17,7 +17,7 @@ gym.register(
     entry_point=f"{__name__}.single_bodyrate_env:QuadcopterEnv",
     disable_env_checker=True,
     kwargs={
-        "env_cfg_entry_point": f"{__name__}.single_bodyrate_env:QuadcopterEnvCfg",
+        "env_cfg_entry_point": f"{__name__}.single_bodyrate_env_cfg:QuadcopterEnvCfg",
 
         "skrl_ppo_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg.yaml",
     },
