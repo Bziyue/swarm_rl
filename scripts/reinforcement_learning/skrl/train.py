@@ -92,23 +92,33 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 import swarm_rl.envs  # noqa: F401
 
 
-import importlib.util
+import inspect
 from pathlib import Path
+from typing import Union
 
-def copy_env_source(env_cfg, dump_dir: str) -> None:
+
+
+
+def copy_env_source(env: gym.Env, dump_dir: Union[str, Path]) -> None:
+    """
+    备份 Gym 环境的源代码到指定目录。
+    """
+
     dump_dir = Path(dump_dir)
     dump_dir.mkdir(parents=True, exist_ok=True)
 
-    # env_cfg 是 SingleBodyrateEnvCfg 的实例
-    module_name = env_cfg.__class__.__module__  # 'swarm_rl.envs.single.single_bodyrate_env'
-    spec = importlib.util.find_spec(module_name)
-    if spec is None or spec.origin is None:
-        raise RuntimeError(f"Cannot locate source for module: {module_name}")
-    else:
-        print(f"Located source for module {module_name} at: {spec.origin}")
-
-    src_path = Path(spec.origin)
-    shutil.copy2(src_path, dump_dir / src_path.name)
+    try:
+        # 精准获取原始环境类（剥离 Wrapper）
+        raw_env_class = env.unwrapped.__class__
+        # 获取文件路径
+        src_file_path = Path(inspect.getfile(raw_env_class))
+        # 构建目标路径
+        dest_file_path = dump_dir / src_file_path.name
+        # 使用 copy2 复制 (保留修改时间戳)
+        shutil.copy2(src_file_path, dest_file_path)
+        print(f"✅ Env 源码已备份:\n  - src_path: {src_file_path}\n  - dest_path: {dest_file_path}")
+    except Exception as e:
+        print(f"❌ 备份失败: {e}")
 
 
 
@@ -168,6 +178,7 @@ def main(env_cfg: DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: dict):
 
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
 
+    # 备份 env 源码
     dump_env_src_dir = os.path.join(log_dir, "src")
     copy_env_source(env, dump_env_src_dir)
 
