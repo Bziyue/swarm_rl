@@ -53,7 +53,7 @@ class PointProvider:
         if len(target_hold_env_ids) > 0:
             self._regenerate_target(target_hold_env_ids)
 
-        return achieve_target, distance_to_target
+        return target_hold, distance_to_target
 
 
     def resample(self, env_ids: torch.Tensor):

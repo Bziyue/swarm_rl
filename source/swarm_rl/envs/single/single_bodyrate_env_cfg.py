@@ -172,7 +172,10 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
     # hover_hold_speed_threshold = 0.5
     hover_yaw_penalty_distance = 0.2
 
-    point_provider: PointProviderCfg = PointProviderCfg()
+    point_provider: PointProviderCfg = PointProviderCfg(
+        target_hold_speed_threshold = 1.0,
+        target_hold_threshold_s = 0.4,
+    )
 
     # ========================================================================
     # Environmental Effects Configuration
@@ -220,7 +223,7 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
         num_envs=1000,
         env_spacing=16.0,
         replicate_physics=True,
-        clone_in_fabric=True
+        # clone_in_fabric=True
     )
 
     # Robot

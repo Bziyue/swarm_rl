@@ -1085,7 +1085,7 @@ class QuadcopterEnv(DirectRLEnv):
         joint_vel = self._robot.data.default_joint_vel[env_ids].clone()
         default_root_state = self._robot.data.default_root_state[env_ids].clone()
 
-        default_root_state[:, :3] = self._point_provider.get_spawn_points()
+        default_root_state[:, :3] = self._point_provider.get_spawn_points()[env_ids]
 
         # # Choose spawn mode based on configuration
         # if self.cfg.spawn_mode == "edges":
