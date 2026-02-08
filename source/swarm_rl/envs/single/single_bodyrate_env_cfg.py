@@ -300,7 +300,7 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
     state_space = {
         "image": gym.spaces.Box(low=-float("inf"), high=float("inf"), shape=(1, image_height, image_width * camera_num), dtype="float32"),
         # 29 = 3 (gyro) + 9 (rot) + 3 (goal) + 1 (speed) + 4 (actions) + 3 (vel) + 3 (goal_dir) + 3 (obstacle_pos)
-        "state": gym.spaces.Box(low=-float("inf"), high=float("inf"), shape=(29,), dtype="float32"),
+        "state": gym.spaces.Box(low=-float("inf"), high=float("inf"), shape=(26,), dtype="float32"),
     }
 
     # ========================================================================

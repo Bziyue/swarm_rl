@@ -229,17 +229,24 @@ class QuadcopterEnv(DirectRLEnv):
 
 
 
-    def CHECK_NAN(self, tensor, name):
-        if torch.isnan(tensor).any().item():
-            print(f"[{name}] NaN detected in tensor of shape {tensor.shape}.")
-            nan_env_mask = torch.any(torch.isnan(tensor), dim=1)
-            nan_env_indices = torch.where(nan_env_mask)[0]
-            print(f"NaN positions: {nan_env_indices}")
-            self._numerical_instability = torch.logical_or(self._numerical_instability, nan_env_mask)
-            tensor = tensor.nan_to_num(nan=0.0)
-            return tensor
-        else:
-            return tensor
+    def CHECK_NAN(self, tensor):
+        # 1. 计算 NaN 掩码 (GPU 操作)
+        nan_mask = torch.isnan(tensor)
+
+        # 2. 计算每行的 NaN 情况 (GPU 操作)
+        row_nan_mask = nan_mask.any(dim=1)
+        
+        # 3. 直接更新 instability 状态 (全 GPU 操作，无 CPU 同步)
+        # 假设 self._numerical_instability 也在 GPU 上
+        self._numerical_instability.logical_or_(row_nan_mask)
+        
+        # 4. 原地修复数值 (GPU 操作)
+        tensor.nan_to_num_(nan=0.0)
+        
+        # 注意：这里去掉了 print，因为 print 必须打断 GPU 流水线。
+        # 如果确实需要监控，建议使用 TensorBoard 或 wandb 记录 row_nan_mask.sum()
+        
+        return tensor
 
 
 
@@ -250,8 +257,8 @@ class QuadcopterEnv(DirectRLEnv):
 
         # State
         ang_vel_b = self._robot.data.root_ang_vel_b
-        rot_w = torch.stack(euler_xyz_from_quat(self._robot.data.root_quat_w), dim=1) # (num_envs, 3) roll, pitch, yaw
-        rot_w = torch.stack([normallize_angle(rot_w[:, 0]), normallize_angle(rot_w[:, 1]), normallize_angle(rot_w[:, 2])], dim=1)
+        # rot_w = torch.stack(euler_xyz_from_quat(self._robot.data.root_quat_w), dim=1) # (num_envs, 3) roll, pitch, yaw
+        # rot_w = torch.stack([normallize_angle(rot_w[:, 0]), normallize_angle(rot_w[:, 1]), normallize_angle(rot_w[:, 2])], dim=1)
         # print(f"Roll: {rot_w[0, 0]}, Pitch: {rot_w[0, 1]}, Yaw: {rot_w[0, 2]}")
         # Check if the state is unstable
         state_is_unstable = torch.any(torch.abs(ang_vel_b) > max_angular_velocity, dim=1)
@@ -605,16 +612,16 @@ class QuadcopterEnv(DirectRLEnv):
         dir_to_goal = pos_to_goal / distance_to_goal.clamp_min(eps)
         pos_to_goal_norm = dir_to_goal * torch.clamp(distance_to_goal / obs_cfg.max_goal_distance, max=1.0)
         
-        # 计算相对于最近障碍物的位移（来自全局点云的 KD-tree；限制最大距离，保持方向不变）
-        _, indices = self.occ_kdtree.query(pos_w.cpu().numpy(), workers=-1)
-        self._closest_points = torch.tensor(self.occ_kdtree.data[indices], device=self.device, dtype=pos_w.dtype)
-        pos_to_obstacle = self._closest_points - pos_w
-        eps = 1e-6
-        if pos_to_obstacle.dtype in (torch.float16, torch.bfloat16):
-            eps = 1e-3
-        distance_to_obstacle = torch.linalg.vector_norm(pos_to_obstacle, dim=1, keepdim=True)
-        dir_to_obstacle = pos_to_obstacle / distance_to_obstacle.clamp_min(eps)
-        pos_to_obstacle_norm = dir_to_obstacle * torch.clamp(distance_to_obstacle / obs_cfg.max_obstacle_distance, max=1.0)
+        # # 计算相对于最近障碍物的位移（来自全局点云的 KD-tree；限制最大距离，保持方向不变）
+        # _, indices = self.occ_kdtree.query(pos_w.cpu().numpy(), workers=-1)
+        # self._closest_points = torch.tensor(self.occ_kdtree.data[indices], device=self.device, dtype=pos_w.dtype)
+        # pos_to_obstacle = self._closest_points - pos_w
+        # eps = 1e-6
+        # if pos_to_obstacle.dtype in (torch.float16, torch.bfloat16):
+        #     eps = 1e-3
+        # distance_to_obstacle = torch.linalg.vector_norm(pos_to_obstacle, dim=1, keepdim=True)
+        # dir_to_obstacle = pos_to_obstacle / distance_to_obstacle.clamp_min(eps)
+        # pos_to_obstacle_norm = dir_to_obstacle * torch.clamp(distance_to_obstacle / obs_cfg.max_obstacle_distance, max=1.0)
 
         # ----------------------------------------
         # 构造观测向量
@@ -643,7 +650,7 @@ class QuadcopterEnv(DirectRLEnv):
                 # 特权观测
                 lin_vel_b             * obs_cfg.lin_vel_scale,         # 线速度（body系）[vx, vy, vz]
                 pos_to_goal_norm      * obs_cfg.pos_to_goal_scale,     # 相对于目标点的位移（最大距离剪裁，方向不变）
-                pos_to_obstacle_norm  * obs_cfg.pos_to_obstacle_scale, # 相对于最近障碍物的位移（最大距离剪裁，方向不变）
+                # pos_to_obstacle_norm  * obs_cfg.pos_to_obstacle_scale, # 相对于最近障碍物的位移（最大距离剪裁，方向不变）
 
                 # TODO: 待测试并加入风扰动
                 # torch.mean(self.wind_acc_log, dim=0) * 30, # wind disturbance
@@ -651,8 +658,8 @@ class QuadcopterEnv(DirectRLEnv):
             dim=-1,
         )
         # 观测值检查
-        policy_obs = self.CHECK_NAN(policy_obs, "Policy Observation")
-        critic_obs = self.CHECK_NAN(critic_obs, "Critic Observation")
+        policy_obs = self.CHECK_NAN(policy_obs)
+        critic_obs = self.CHECK_NAN(critic_obs)
         self.CHECK_state()
 
         return {
@@ -783,21 +790,21 @@ class QuadcopterEnv(DirectRLEnv):
         )
         obstacle_collision_penalty = -obstacle_collision_penalty
 
-        # Perform KD-tree query once to get nearest obstacle distances
-        nearest_obstacle_distances = None
-        if self.occ_kdtree is not None:
-            d, _ = self.occ_kdtree.query(pos_w.cpu(), workers=-1, distance_upper_bound=4.0)
-            nearest_obstacle_distances = torch.tensor(d, dtype=pos_w.dtype, device=self.device)
+        # # Perform KD-tree query once to get nearest obstacle distances
+        # nearest_obstacle_distances = None
+        # if self.occ_kdtree is not None:
+        #     d, _ = self.occ_kdtree.query(pos_w.cpu(), workers=-1, distance_upper_bound=4.0)
+        #     nearest_obstacle_distances = torch.tensor(d, dtype=pos_w.dtype, device=self.device)
 
-        # ESDF-based reward
-        esdf_reward = torch.zeros_like(vel_b[:, 0])
-        if nearest_obstacle_distances is not None:
-            safe_threshold = 0.5
-            esdf_reward = torch.where(
-                nearest_obstacle_distances < safe_threshold,
-                -(torch.exp(5.0 * (safe_threshold - nearest_obstacle_distances)) - 1.0),
-                torch.zeros_like(nearest_obstacle_distances),
-            )
+        # # ESDF-based reward
+        # esdf_reward = torch.zeros_like(vel_b[:, 0])
+        # if nearest_obstacle_distances is not None:
+        #     safe_threshold = 0.5
+        #     esdf_reward = torch.where(
+        #         nearest_obstacle_distances < safe_threshold,
+        #         -(torch.exp(5.0 * (safe_threshold - nearest_obstacle_distances)) - 1.0),
+        #         torch.zeros_like(nearest_obstacle_distances),
+        #     )
 
         
         # # TODO: 可以抽象为目标管理对象
@@ -891,7 +898,7 @@ class QuadcopterEnv(DirectRLEnv):
             ("vel_speed_match_reward",     vel_speed_match_reward,     reward_cfg.coef_vel_speed_match_reward),
             ("z_position_penalty",         z_position_penalty,         reward_cfg.coef_z_position_penalty),
             ("obstacle_collision_penalty", obstacle_collision_penalty, reward_cfg.coef_obstacle_collision_penalty),
-            ("esdf_reward",                esdf_reward,                reward_cfg.coef_esdf_reward),
+            # ("esdf_reward",                esdf_reward,                reward_cfg.coef_esdf_reward),
             ("succeed_reward",             succeed_reward,             reward_cfg.coef_succeed_reward),
             ("max_ang_vel_penalty",        max_ang_vel_penalty,        reward_cfg.coef_max_ang_vel_penalty),
             ("max_angle_penalty",          max_angle_penalty,          reward_cfg.coef_max_angle_penalty),
@@ -1018,7 +1025,7 @@ class QuadcopterEnv(DirectRLEnv):
 
         # TODO: 考虑抽象为回合评估统计对象
         # Update episode outcomes and metrics
-        self._update_episode_outcomes_and_metrics(env_ids, success_mask, died_mask, timed_out_mask)
+        # self._update_episode_outcomes_and_metrics(env_ids, success_mask, died_mask, timed_out_mask)
 
 
         # Reset environment states
