@@ -12,13 +12,13 @@ from . import agents
 ##
 
 
-# gym.register(
-#     id="Fast-Single-Bodyrate",
-#     entry_point=f"{__name__}.single_bodyrate_env:TestExternalEnv",
-#     disable_env_checker=True,
-#     kwargs={
-#         "env_cfg_entry_point": f"{__name__}.single_bodyrate_env:TestExternalEnvCfg",
+gym.register(
+    id="FAST-Swarm-Bodyrate",
+    entry_point=f"{__name__}.swarm_bodyrate_env:QuadcopterEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.swarm_bodyrate_env_cfg:QuadcopterEnvCfg",
 
-#         "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg.yaml",
-#     },
-# )
+        "skrl_ppo_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg.yaml",
+    },
+)

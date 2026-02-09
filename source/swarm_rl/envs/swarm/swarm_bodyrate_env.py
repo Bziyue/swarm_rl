@@ -1,1128 +1,1235 @@
+# Copyright (c) 2022-2025, The Isaac Lab Project Developers.
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 from __future__ import annotations
 
-import gymnasium as gym
+import omni
+import torch
+import isaaclab.sim as sim_utils
+from isaaclab.sim.utils import find_matching_prim_paths
+from isaaclab.assets import Articulation
+from isaaclab.envs import DirectRLEnv
+from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
+from isaaclab.sensors import ContactSensor
+from isaaclab.sim.schemas import activate_contact_sensors
+from isaaclab.utils.math import subtract_frame_transforms, euler_xyz_from_quat, matrix_from_quat
+from isaaclab.utils.noise import GaussianNoiseCfg
+from isaaclab.markers import CUBOID_MARKER_CFG, GREEN_ARROW_X_MARKER_CFG, FRAME_MARKER_CFG
+from isaaclab.utils.timer import Timer
+import isaacsim.core.utils.prims as prims_utils
+from pxr import PhysxSchema, Sdf, UsdGeom, UsdPhysics, Gf
+from collections import deque
+import numpy as np
+import textwrap
+import random
 import math
 import time
-import torch
-from collections.abc import Sequence
-from loguru import logger
+import os
 
-from rclpy.node import Node
-from builtin_interfaces.msg import Time
-from nav_msgs.msg import Odometry
-from geometry_msgs.msg import TwistStamped, Vector3Stamped
+# from swarm_rl.utils.e2e_drone.bev_utils import depth_to_bev_torch
+# from swarm_rl.utils.e2e_drone.controller import Quadrotor, QuadrotorDynamics
+from swarm_rl.utils.e2e_drone.map_generator import MapGenerator
+# from swarm_rl.utils.e2e_drone.occ_collector import OccCollector
+# from swarm_rl.utils.e2e_drone.death_replay_collector import DeathReplayCollector
+# from swarm_rl.utils.e2e_drone.wind_gen import WindGustGenerator
+# from swarm_rl.utils.e2e_drone.thrust_uncertainty import ThrustUncertaintySimulator
+# from swarm_rl.utils.e2e_drone.height_randomizer import HeightRandomizer
+from swarm_rl.utils.e2e_drone.asset_paths import get_ui_arrow_usd_path, get_ui_frame_usd_path
+from enum import IntEnum, auto
+import collections
+import itertools
 
-import isaaclab.sim as sim_utils
-from isaaclab.assets import Articulation, ArticulationCfg
-from isaaclab.envs import DirectMARLEnv, DirectMARLEnvCfg, ViewerCfg
-from isaaclab.markers import VisualizationMarkersCfg, VisualizationMarkers
-from isaaclab.scene import InteractiveSceneCfg
-from isaaclab.sim import SimulationCfg
-from isaaclab.terrains import TerrainImporterCfg
-from isaaclab.utils import configclass, CircularBuffer, DelayBuffer
-from isaaclab.markers import CUBOID_MARKER_CFG  # isort: skip
-from isaaclab.utils.math import quat_inv, quat_apply
+from swarm_rl.utils.controller import bodyrate_control_without_thrust
+from swarm_rl.utils.depth_camera_array import DepthCameraArray
+from swarm_rl.utils.point_provider import PointProvider
 
-from envs.quadcopter import CRAZYFLIE_CFG, DJI_FPV_CFG  # isort: skip
-from utils.utils import quat_to_ang_between_z_body_and_z_world
-from utils.controller import bodyrate_control_without_thrust
-from utils.custom_trajs import generate_custom_trajs, LissajousConfig
+from swarm_rl.utils.e2e_drone.reloadable_raycaster_camera import ReloadableRayCasterCameraCfg
+
+from .swarm_bodyrate_env_cfg import QuadcopterEnvCfg
 
 
-@configclass
-class SwarmBodyrateEnvCfg(DirectMARLEnvCfg):
-    # Change viewer settings
-    viewer = ViewerCfg(eye=(3.0, -3.0, 10.0))
-
-    # Reward weights
-    to_live_reward_weight = 1.0  # 《活着》
-    death_penalty_weight = 0.0
-    approaching_goal_reward_weight = 10.0
-    success_reward_weight = 10.0
-    mutual_collision_penalty_weight = 20.0
-    mutual_collision_avoidance_soft_penalty_weight = 0.1
-    ang_vel_penalty_weight = 0.05
-    action_norm_penalty_weight = 0.05
-    action_norm_near_goal_penalty_weight = 10.0
-    action_diff_penalty_weight = 0.05
-    # Exponential decay factors and tolerances
-    mutual_collision_avoidance_reward_scale = 1.0
-
-    # Mission settings
-    flight_range = 3.5
-    flight_altitude = 1.0  # Desired flight altitude
-    safe_dist = 1.0
-    collide_dist = 0.5
-    goal_reset_time_range = (0.2, 5.0)  # Delay for resetting goal after reaching it
-    mission_names = ["migration", "crossover", "chaotic"]
-    mission_prob = [0.0, 0.5, 0.5]
-    # mission_prob = [1.0, 0.0, 0.0]
-    # mission_prob = [0.0, 1.0, 0.0]
-    # mission_prob = [0.0, 0.0, 1.0]
-    success_distance_threshold = 0.25  # Distance threshold for considering goal reached
-    max_sampling_tries = 100  # Maximum number of attempts to sample a valid initial state or goal
-    # Params for mission migration
-    use_custom_traj = True  # Whether to use custom trajectory for migration mission
-    num_custom_trajs = 128
-    lissajous_cfg = LissajousConfig()
-    # Params for mission crossover
-    fix_range = False
-    uniformly_distributed_prob = 0.5
-
-    # Observation parameters
-    lin_vel_obs_delay_ms = 20.0  # VIO delay: 5ms with imu propogation
-    rel_pos_obs_delay_ms = 200.0  # Seeker Omni-4P streaming delay: 160ms + YOLO delay: 40ms
-    max_visible_distance = 5.0
-    max_angle_of_view = 40.0  # Maximum field of view of camera in tilt direction
-    # Domain randomization
-    enable_domain_randomization = True
-    lin_vel_noise_std = 0.1
-    min_dist_noise_std = 0.05
-    max_dist_noise_std = 0.5
-    min_bearing_noise_std = 0.005
-    max_bearing_noise_std = 0.05
-    drop_prob = 0.1
-
-    # Parameters for environment and agents
-    episode_length_s = 300.0
-    physics_freq = 200
-    control_freq = 100
-    action_freq = 50
-    gui_render_freq = 50
-    control_decimation = max(1, physics_freq // control_freq)
-    num_drones = 5  # Number of drones per environment
-    decimation = max(1, math.ceil(physics_freq / action_freq))  # Environment decimation
-    render_decimation = max(1, physics_freq // gui_render_freq)
-    clip_action = 1.0
-    history_length = 3
-    self_observation_dim = 17
-    relative_observation_dim = 4
-    transient_observasion_dim = self_observation_dim + relative_observation_dim * (num_drones - 1)
-    observation_spaces = None
-    transient_state_dim = 20 * num_drones
-    state_space = transient_state_dim
-    possible_agents = [f"drone_{i}" for i in range(num_drones)]
-    action_spaces = {agent: 4 for agent in possible_agents}
-    thrust_to_weight = {agent: 2.0 for agent in possible_agents}
-    w_max = {agent: 6.0 for agent in possible_agents}
-
-    def __post_init__(self):
-        self.observation_spaces = {agent: self.history_length * self.transient_observasion_dim for agent in self.possible_agents}
-
-    # Simulation
-    sim: SimulationCfg = SimulationCfg(
-        dt=1 / physics_freq,
-        render_interval=render_decimation,
-        physics_material=sim_utils.RigidBodyMaterialCfg(
-            friction_combine_mode="multiply",
-            restitution_combine_mode="multiply",
-            static_friction=1.0,
-            dynamic_friction=1.0,
-            restitution=0.0,
-        ),
-    )
-    terrain = TerrainImporterCfg(
-        prim_path="/World/ground",
-        terrain_type="plane",
-        collision_group=-1,
-        physics_material=sim_utils.RigidBodyMaterialCfg(
-            friction_combine_mode="multiply",
-            restitution_combine_mode="multiply",
-            static_friction=1.0,
-            dynamic_friction=1.0,
-            restitution=0.0,
-        ),
-        debug_vis=False,
-    )
-
-    # Scene
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=10000, env_spacing=15, replicate_physics=True)
-
-    # Robot
-    drone_cfg: ArticulationCfg = DJI_FPV_CFG.copy()
-    init_gap = 2.0  # TODO: Redundant feature, to be removed o_0
-
-    # Debug visualization
-    debug_vis = True
-    debug_vis_goal = True
-    debug_vis_collide_dist = True
-    debug_vis_rel_pos = False
+# [0, 2pi] -> [-pi, pi]
+def normallize_angle(angle: torch.Tensor):
+    return torch.fmod(angle + math.pi, 2 * math.pi) - math.pi
 
 
-class SwarmBodyrateEnv(DirectMARLEnv):
-    cfg: SwarmBodyrateEnvCfg
+class QuadcopterEnv(DirectRLEnv):
+    """A quadcopter environment adapted to use the reward logic from the training code."""
 
-    def __init__(self, cfg: SwarmBodyrateEnvCfg, render_mode: str | None = None, **kwargs):
+    cfg: QuadcopterEnvCfg
+
+    def __init__(self, cfg: QuadcopterEnvCfg, render_mode: str | None = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
-        logger.info(f"Action decimation = {self.cfg.decimation}")
-        logger.info(f"Controller decimation = {self.cfg.control_decimation}")
 
-        self.goals = {agent: torch.zeros(self.num_envs, 3, device=self.device) for agent in self.cfg.possible_agents}
-        self.prev_dist_to_goals = {agent: torch.zeros(self.num_envs, device=self.device) for agent in self.cfg.possible_agents}
-        self.env_mission_ids = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
-        self.reset_goal_timer = {agent: torch.zeros(self.num_envs, device=self.device) for agent in self.cfg.possible_agents}
-        self.died = {agent: torch.zeros(self.num_envs, dtype=torch.bool, device=self.device) for agent in self.cfg.possible_agents}
-        self.success_dist_thr = torch.zeros(self.num_envs, device=self.device)
+        self.extras["log"] = dict() # 初始化日志字典
 
-        self.mission_prob = torch.tensor(self.cfg.mission_prob, device=self.device)
-        # Mission migration params
-        self.unified_goal_xy = torch.zeros(self.num_envs, 2, device=self.device)
-        if self.cfg.use_custom_traj:
-            # Pre-generate multiple custom trajectories for migration mission
-            sample_pos = torch.zeros(self.cfg.num_custom_trajs, 3, device=self.device)
-            sample_pos[:, 2] = float(self.cfg.flight_altitude)
-            sample_vel = torch.zeros(self.cfg.num_custom_trajs, 3, device=self.device)
-            sample_acc = torch.zeros(self.cfg.num_custom_trajs, 3, device=self.device)
-            trajs = generate_custom_trajs(
-                type_id="lissajous",
-                p_odom=sample_pos,
-                v_odom=sample_vel,
-                a_odom=sample_acc,
-                p_init=sample_pos,
-                custom_cfg=self.cfg.lissajous_cfg,
+
+        # TODO: 待测试并加入油门不确定度、风扰动
+        # # Initialize wind generator
+        # self._wind_gen = WindGustGenerator(
+        #     num_envs=self.num_envs,
+        #     device=self.device,
+        #     dt=self.cfg.sim.dt,
+        #     tau=self.cfg.wind_tau,
+        #     sigma=self.cfg.wind_sigma
+        # )
+        # self.wind_acc_log = torch.zeros(self.cfg.decimation, self.num_envs, 3, device=self.device)  # Wind acceleration log for each environment
+        # # Initialize thrust uncertainty simulator
+        # if self.cfg.enable_thrust_uncertainty:
+        #     episode_length_steps = int(self.cfg.episode_length_s * self.cfg.step_freq)
+        #     self._thrust_uncertainty = ThrustUncertaintySimulator(
+        #         num_envs=self.num_envs,
+        #         device=self.device,
+        #         dt=self.cfg.sim.dt,
+        #         episode_length_steps=episode_length_steps,
+        #         initial_effectiveness_range=self.cfg.thrust_uncertainty_initial_range,
+        #         degradation_factor_range=self.cfg.thrust_uncertainty_degradation_range,
+        #         min_effectiveness=self.cfg.thrust_uncertainty_min_effectiveness,
+        #     )
+        # else:
+        #     self._thrust_uncertainty = None
+
+
+        # TODO: 待测试并加入高度平滑
+        # # Initialize height randomizer
+        # if self.cfg.enable_height_randomization:
+        #     self._height_randomizer = HeightRandomizer(
+        #         num_envs=self.num_envs,
+        #         device=self.device,
+        #         height_range=self.cfg.height_randomization_range,
+        #         dt=self.cfg.sim.dt * self.cfg.decimation,
+        #         climb_rate=self.cfg.height_randomization_climb_rate,
+        #         waypoint_distance=self.cfg.height_randomization_waypoint_distance,
+        #         noise_scale=self.cfg.height_randomization_noise_scale,
+        #         debug_save_dir=self.cfg.height_randomization_debug_dir
+        #     )
+        # else:
+        #     self._height_randomizer = None
+
+
+        # TODO: self._robot_mass, self._robot_inertia 仿真与代码中不一致是为什么（底层控制器会用到）
+        # TODO: 考虑使用 lsaaclab 管理类自动实现域随机化
+        # Mass randomization setup
+        if self.cfg.enable_mass_randomization:
+            self._base_mass = self.cfg.robot_mass
+            self._base_inertia = torch.tensor(self.cfg.robot_inertia, device=self.device)
+            self._mass_range = (
+                self._base_mass * (1.0 - self.cfg.mass_randomization_percent),
+                self._base_mass * (1.0 + self.cfg.mass_randomization_percent)
             )
-            self.custom_traj_library = trajs
-            self.custom_traj_durations = trajs.get_total_duration()
-            self.custom_traj_exec_indexs = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
-            self.custom_traj_exec_timesteps = torch.zeros(self.num_envs, device=self.device)
+            # Initialize with randomized masses
+            self._robot_mass = torch.empty(self.num_envs, device=self.device).uniform_(*self._mass_range)
+            # Scale inertia with mass ratio (I = I_base * mass_ratio)
+            mass_ratio = self._robot_mass / self._base_mass
+            self._robot_inertia = self._base_inertia.unsqueeze(0) * mass_ratio.unsqueeze(1)
+        else:
+            self._robot_mass = torch.full((self.num_envs,), self.cfg.robot_mass, device=self.device)
+            self._robot_inertia = torch.tensor(self.cfg.robot_inertia, device=self.device).repeat(self.num_envs, 1)
 
-        # Mission crossover params
-        self.rand_r = torch.zeros(self.num_envs, device=self.device)
-        self.ang = torch.zeros(self.num_envs, self.cfg.num_drones, device=self.device)
+        self._robot_inertia = torch.diag_embed(self._robot_inertia)  # Convert to inertia tensors
 
-        self.body_ids = {agent: self.robots[agent].find_bodies("body")[0] for agent in self.cfg.possible_agents}  # Get specific body indices for each drone
-        self.robot_masses = {agent: self.robots[agent].root_physx_view.get_masses()[0, 0].to(self.device) for agent in self.cfg.possible_agents}
-        self.robot_inertias = {agent: self.robots[agent].root_physx_view.get_inertias()[0, 0].to(self.device) for agent in self.cfg.possible_agents}
-        self.gravity = torch.tensor(self.sim.cfg.gravity, device=self.device)
-        self.robot_weights = {agent: (self.robot_masses[agent] * self.gravity.norm()).item() for agent in self.cfg.possible_agents}
 
-        # Normalized actions
-        self.actions = {agent: torch.zeros(self.num_envs, self.cfg.action_spaces[agent], device=self.device) for agent in self.cfg.possible_agents}
-        self.prev_actions = {agent: torch.zeros(self.num_envs, self.cfg.action_spaces[agent], device=self.device) for agent in self.cfg.possible_agents}
+        # Controller gains
+        self._controller_kp_bodyrate = torch.tensor(self.cfg.kp_bodyrate, device=self.device)
 
-        # Denormalized actions
-        self.thrusts_desired = {agent: torch.zeros(self.num_envs, 1, 3, device=self.device) for agent in self.cfg.possible_agents}
-        self.w_desired = {}
-        self.m_desired = {agent: torch.zeros(self.num_envs, 1, 3, device=self.device) for agent in self.cfg.possible_agents}
 
-        # Controller
-        self.kPw = {agent: torch.tensor([0.05, 0.05, 0.05], device=self.device) for agent in self.cfg.possible_agents}
-        self.control_counter = 0
+        # 策略 action
+        self._actions       = torch.zeros(self.num_envs, self.cfg.action_space, device=self.device) # [thrust, bodyrate(x, y, z)]
+        self._last_actions  = torch.zeros(self.num_envs, self.cfg.action_space, device=self.device) # [thrust, bodyrate(x, y, z)]
+        # 低层控制量
+        self._thrust_max    = self.cfg.thrust_weight_ratio * self.cfg.robot_mass * 9.81 # 最大推力 (推重比 * M * g) (N)
+        self._bodyrate_max  = self.cfg.bodyrate_max                                     # 最大角速度 (rad/s)
+        self._thrust_desired    = torch.zeros(self.num_envs, 1, device=self.device) # 策略 action 映射到的期望推力
+        self._bodyrate_desired  = torch.zeros(self.num_envs, 3, device=self.device) # 策略 action 映射到的期望角速度 (x, y, z)
+        self._forces    = torch.zeros(self.num_envs, 1, 3, device=self.device)  # 控制器计算出的控制力
+        self._torques   = torch.zeros(self.num_envs, 1, 3, device=self.device)  # 控制器计算出的控制力矩
 
-        self.relative_positions_w = {
-            i: {j: torch.zeros(self.num_envs, 3, device=self.device) for j in range(self.cfg.num_drones) if j != i} for i in range(self.cfg.num_drones)
-        }
-        self.rel_pos_w_noisy_with_observability = {}  # For visualization only
+        # “上一时刻” 数据
+        self._last_pos_w = torch.zeros(self.num_envs, 3, device=self.device)
+        # done 相关标志
+        self._numerical_instability = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self._is_contact = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self._is_success = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
 
-        # Delay for observation
-        self.lin_vel_obs_max_lag = 0 if self.cfg.lin_vel_obs_delay_ms <= 0.0 else int(math.ceil(self.cfg.lin_vel_obs_delay_ms * 1e-3 / self.step_dt))
-        logger.info(f"Max lin vel observation delay = {self.lin_vel_obs_max_lag} env steps")
-        self.lin_vel_delay = {
-            agent: DelayBuffer(
-                history_length=self.lin_vel_obs_max_lag,
-                batch_size=self.num_envs,
-                device=self.device,
-            )
-            for agent in self.cfg.possible_agents
-        }
-        self.rel_pos_max_lag = 0 if self.cfg.rel_pos_obs_delay_ms <= 0.0 else int(math.ceil(self.cfg.rel_pos_obs_delay_ms * 1e-3 / self.step_dt))
-        logger.info(f"Max rel pos observation delay = {self.rel_pos_max_lag} env steps")
-        self.rel_pos_delay = {
-            agent: DelayBuffer(
-                history_length=self.rel_pos_max_lag,
-                batch_size=self.num_envs,
-                device=self.device,
-            )
-            for agent in self.cfg.possible_agents
-        }
 
-        # Sliding window for observation
-        self.observation_windows = {
-            agent: CircularBuffer(
-                max_len=self.cfg.history_length,
-                batch_size=self.num_envs,
-                device=self.device,
-            )
-            for agent in self.cfg.possible_agents
-        }
+        # TODO: 可以抽象为目标管理对象
+        # Goal queue system
+        self._goal_queue = torch.zeros(self.num_envs, self.cfg.num_goals, 3, device=self.device)  # Queue of goals for each environment
+        self._current_goal_index = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)  # Current goal index for each environment
+        self._num_goals_remaining = torch.full((self.num_envs,), self.cfg.num_goals, dtype=torch.long, device=self.device)  # Goals remaining for each environment
 
-        # Logging
-        self.episode_sums = {}
+        # Current goal (legacy compatibility)
+        self._desired_pos_w = torch.zeros(self.num_envs, 3, device=self.device)
+        self._desired_yaw_quat = torch.zeros(self.num_envs, 4, device=self.device)
+        self._desired_speed_init = torch.zeros(self.num_envs, 1, device=self.device)
+        self._desired_speed = self._desired_speed_init
 
-        # Add handle for debug visualization (this is set to a valid handle inside set_debug_vis)
-        self.set_debug_vis(self.cfg.debug_vis)
 
-        # ROS2
-        self.node = Node("swarm_bodyrate_env", namespace="swarm_bodyrate_env")
-        self.odom_pub = self.node.create_publisher(Odometry, "odom", 10)
-        self.action_pub = self.node.create_publisher(TwistStamped, "action", 10)
-        self.m_desired_pub = self.node.create_publisher(Vector3Stamped, "m_desired", 10)
+        # TODO: 刚体名写成可配置参数；进行打印、收紧逻辑以确保映射正确
+        # Robot references
+        body_id, _ = self._robot.find_bodies("body")
+        self._body_id = torch.tensor(body_id, dtype=torch.long, device=self.device)
+        contact_ids, _ = self._contact_sensor.find_bodies("body")
+        self._undesired_contact_ids = torch.tensor(contact_ids, dtype=torch.long, device=self.device)
+
+
+        # TODO: 考虑抽象为多地图管理器对象
+        # Initialize dual map system
+        self._active_map_id = 0  # 0 or 1
+        self._env_map_assignments = torch.zeros(self.num_envs, dtype=torch.int32, device=self.device)  # Track which map each env uses
+        self._map_data = [None, None]  # Store data for both maps
+        self._map_generators = [
+            MapGenerator(sim=self.sim, device=self.device, map_origin=(0.0, -self.cfg.scene.env_spacing * self.cfg.map_spacing_factor, 0.0), base_prim="/World/ground/map_1"),
+            MapGenerator(sim=self.sim, device=self.device, map_origin=(0.0, +self.cfg.scene.env_spacing * self.cfg.map_spacing_factor, 0.0), base_prim="/World/ground/map_2")
+        ]
+        self._map_regeneration_in_progress = False
+        self._map_generation_timer = self.cfg.map_generation_step_threshold
+
+        # Legacy variables for compatibility
+        self.occ_kdtree = None
+        self.free_points = np.array([[0, 0, 0]], dtype=np.float32)
+        self._closest_points = torch.zeros(self.num_envs, 3, device=self.device)
+
+
+        # TODO: 考虑抽象为回合评估统计对象
+        # Add tracking for episode outcomes and success rate
+        self._success_rate_window = self.cfg.success_rate_window_size
+        self._episode_outcomes = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)  # 0=ongoing, 1=success, 2=died
+        self._episodes_completed = 0
+        self._episodes_succeeded = 0
+        self._success_rate = 0.0
+        self._episode_outcome_history = collections.deque(maxlen=self._success_rate_window)
+        self._termination_reason_history = collections.deque(maxlen=self._success_rate_window)
+        self._final_distances = collections.deque(maxlen=self._success_rate_window)
+
+
+
 
     def _setup_scene(self):
-        self.robots = {}
-        points_per_side = math.ceil(math.sqrt(self.cfg.num_drones))
-        side_length = (points_per_side - 1) * self.cfg.init_gap
-        for i, agent in enumerate(self.cfg.possible_agents):
-            row = i // points_per_side
-            col = i % points_per_side
-            init_pos = (col * self.cfg.init_gap - side_length / 2, row * self.cfg.init_gap - side_length / 2, self.cfg.flight_altitude)
+        """Create and clone the environment scene."""
 
-            drone = Articulation(
-                self.cfg.drone_cfg.replace(
-                    prim_path=f"/World/envs/env_.*/Robot_{i}",
-                    init_state=self.cfg.drone_cfg.init_state.replace(pos=init_pos),
-                )
-            )
-            self.robots[agent] = drone
-            self.scene.articulations[agent] = drone
+        # 初始化 depth cameras，并注册到 scene 中
+        self._depth_cameras = DepthCameraArray(
+            self.cfg.depth_cameras,
+            device=self.device,
+            camera_cfg_cls=ReloadableRayCasterCameraCfg,
+        )
+        self._depth_cameras.register_to_scene(self.scene)
 
-        self.cfg.terrain.num_envs = self.scene.cfg.num_envs
-        self.cfg.terrain.env_spacing = self.scene.cfg.env_spacing
-        self.terrain = self.cfg.terrain.class_type(self.cfg.terrain)
 
-        # Clone, filter, and replicate
+        # TODO: self._robot_mass, self._robot_inertia 仿真与代码中不一致是为什么（底层控制器会用到）
+        # TODO: 考虑使用 lsaaclab 管理类自动实现域随机化
+        # Set up the robot
+        with Timer("[INFO]: Time taken for Articulation generation (inside gym.make)", "QuadcopterEnv"):
+            self._robot = Articulation(self.cfg.robot)
+        robot_prims = find_matching_prim_paths("/World/envs/env_.*/Robot")
+        # with Timer("[INFO]: Time taken for robot prims setup (inside gym.make)", "QuadcopterEnv"):
+            # for prim_path in robot_prims:
+            #     prims_utils.set_prim_property(prim_path + "/body", "physics:mass", 0.049)
+            #     prims_utils.set_prim_property(prim_path + "/body", "physics:diagonalInertia", (1.3615e-5, 1.3615e-5, 3.257e-5))
+            #     prims_utils.set_prim_property(prim_path, "visibility", "invisible")
+            #     scale = 1.5
+            #     prims_utils.set_prim_property(prim_path, "xformOp:scale", (scale, scale, scale))
+
+        
+        # TODO: 考虑抽象为多地图管理器对象
+        # Initialize dual map system BEFORE camera setup
+        self._active_map_id = 0  # 0 or 1
+        self._env_map_assignments = torch.zeros(self.num_envs, dtype=torch.int32, device=self.device)  # Track which map each env uses
+        self._map_data = [None, None]  # Store data for both maps
+        self._map_generators = [
+            MapGenerator(sim=self.sim, device=self.device, map_origin=(0.0, -self.cfg.scene.env_spacing * self.cfg.map_spacing_factor, 0.0), base_prim="/World/ground/map_1"),
+            MapGenerator(sim=self.sim, device=self.device, map_origin=(0.0, +self.cfg.scene.env_spacing * self.cfg.map_spacing_factor, 0.0), base_prim="/World/ground/map_2")
+        ]
+        self._map_regeneration_in_progress = False
+        self._map_generation_timer = self.cfg.map_generation_step_threshold
+        self._regenerate_terrain()
+
+
+        # Clone the scene
         self.scene.clone_environments(copy_from_source=False)
 
+        # Add the robot and camera to the scene
+        self.scene.articulations["robot"] = self._robot
+
         # Add lights
-        light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
-        light_cfg.func("/World/Light", light_cfg)
+        self.cfg.light.func("/World/Light", self.cfg.light)
 
-    def _pre_physics_step(self, actions: dict[str, torch.Tensor]) -> None:
-        for agent in self.possible_agents:
-            # Denormalize and clip the input signal
-            self.actions[agent] = actions[agent].clone().clamp(-self.cfg.clip_action, self.cfg.clip_action) / self.cfg.clip_action
-            thrusts_desired_normalized = (self.actions[agent][:, 0] + 1.0) / 2
-            w_desired_normalized = self.actions[agent][:, 1:]
+        # Activate contact sensors
+        with Timer("[INFO]: Time taken to activate contact sensors (inside gym.make)", "QuadcopterEnv"):
+            activate_contact_sensors("/World", threshold=1.0)
+            self._contact_sensor = ContactSensor(self.cfg.contact_sensor)
+            self.scene.sensors["contact_sensor"] = self._contact_sensor
 
-            self.thrusts_desired[agent][:, 0, 2] = self.cfg.thrust_to_weight[agent] * self.robot_weights[agent] * thrusts_desired_normalized
-            self.w_desired[agent] = self.cfg.w_max[agent] * w_desired_normalized
 
-    def _apply_action(self) -> None:
-        if self.control_counter % self.cfg.control_decimation == 0:
-            for agent in self.possible_agents:
-                self.m_desired[agent][:, 0, :] = bodyrate_control_without_thrust(
-                    self.robots[agent].data.root_ang_vel_w, self.w_desired[agent], self.robot_inertias[agent], self.kPw[agent]
-                )
+        # TODO: 考虑抽象为多地图管理器对象
+        # Counters
+        self._map_generation_timer = 0
 
-            self._publish_debug_signals()
 
-            self.control_counter = 0
-        self.control_counter += 1
 
-        for agent in self.possible_agents:
-            self.robots[agent].set_external_force_and_torque(self.thrusts_desired[agent], self.m_desired[agent], body_ids=self.body_ids[agent])
 
-    def _get_dones(self) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
-        died_unified = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-        for agent in self.possible_agents:
+    # TODO: 考虑抽象为多地图管理器对象
+    def _regenerate_terrain(self):
+        """Generate new terrain and obstacles using dual map system."""
+        self._map_generation_timer += 1
+        if self._map_regeneration_in_progress or self._map_generation_timer < self.cfg.map_generation_step_threshold:
+            return
+        self._map_regeneration_in_progress = True
 
-            z_exceed_bounds = torch.logical_or(self.robots[agent].data.root_pos_w[:, 2] < 0.5, self.robots[agent].data.root_pos_w[:, 2] > 1.5)
-            ang_between_z_body_and_z_world = torch.rad2deg(quat_to_ang_between_z_body_and_z_world(self.robots[agent].data.root_quat_w))
-            self.died[agent] = torch.logical_or(z_exceed_bounds, ang_between_z_body_and_z_world > 80.0)
+        # self._update_curriculum()
 
-            x_exceed_bounds = torch.logical_or(
-                self.robots[agent].data.root_pos_w[:, 0] - self.terrain.env_origins[:, 0] < -self.cfg.flight_range,
-                self.robots[agent].data.root_pos_w[:, 0] - self.terrain.env_origins[:, 0] > self.cfg.flight_range,
-            )
-            y_exceed_bounds = torch.logical_or(
-                self.robots[agent].data.root_pos_w[:, 1] - self.terrain.env_origins[:, 1] < -self.cfg.flight_range,
-                self.robots[agent].data.root_pos_w[:, 1] - self.terrain.env_origins[:, 1] > self.cfg.flight_range,
-            )
-            self.died[agent] = torch.logical_or(self.died[agent], torch.logical_or(x_exceed_bounds, y_exceed_bounds))
+        try:
+            # Determine which map to regenerate (the inactive one)
+            inactive_map_id = 1 - self._active_map_id
 
-            died_unified = torch.logical_or(died_unified, self.died[agent])
+            # Check if any environments are still using the inactive map
+            envs_on_inactive = torch.sum(self._env_map_assignments == inactive_map_id).item()
 
-        # Update relative positions, detecting collisions along the way
-        for i, agent_i in enumerate(self.possible_agents):
-            for j, agent_j in enumerate(self.possible_agents):
-                if i == j:
-                    continue
-                self.relative_positions_w[i][j] = self.robots[agent_j].data.root_pos_w - self.robots[agent_i].data.root_pos_w
+            if envs_on_inactive > 0:
+                print(f"Cannot regenerate inactive map {inactive_map_id}: {envs_on_inactive} environments still using it")
+                return
 
-                # collision = torch.linalg.norm(self.relative_positions_w[i][j], dim=1) < self.cfg.collide_dist
-                # self.died[agent_i] = torch.logical_or(self.died[agent_i], collision)
-            # died_unified = torch.logical_or(died_unified, self.died[agent_i])
+            print(f"Regenerating inactive map {inactive_map_id}")
 
-        time_out = self.episode_length_buf >= self.max_episode_length - 1
+            # Get the appropriate map generator
+            map_generator = self._map_generators[inactive_map_id]
 
-        return {agent: died_unified for agent in self.possible_agents}, {agent: time_out for agent in self.possible_agents}
-
-    def _get_rewards(self) -> dict[str, torch.Tensor]:
-        rewards = {}
-
-        for i, agent in enumerate(self.possible_agents):
-            # Reward for avoiding collisions with other drones
-            collide = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-            mutual_collision_avoidance_soft_reward = torch.zeros(self.num_envs, device=self.device)
-            for j, _ in enumerate(self.possible_agents):
-                if i == j:
-                    continue
-
-                dist_btw_drones = torch.linalg.norm(self.relative_positions_w[i][j], dim=1)
-                collide = torch.logical_or(collide, dist_btw_drones < self.cfg.collide_dist)
-
-                collision_soft_penalty = torch.where(
-                    dist_btw_drones < self.cfg.safe_dist,
-                    torch.exp(self.cfg.mutual_collision_avoidance_reward_scale * (self.cfg.safe_dist - dist_btw_drones)) - 1.0,
-                    torch.zeros(self.num_envs, device=self.device),
-                )
-                mutual_collision_avoidance_soft_reward -= collision_soft_penalty
-
-            mutual_collision_reward = -torch.where(
-                collide,
-                torch.ones(self.num_envs, device=self.device),
-                torch.zeros(self.num_envs, device=self.device),
+            # Create obstacles environment for inactive map
+            env_data = map_generator.create_environment(
+                self.cfg.scene,
+                num_obstacles=int(self.cfg.scene.env_spacing * self.cfg.scene.env_spacing // 0.25),
+                num_floaters=int(self.cfg.scene.env_spacing * self.cfg.scene.env_spacing // 1.0),
+                # num_floaters=0,
+                min_distance=self.cfg.obstacle_min_distance_init,
+                obstacle_size_range=self.cfg.obstacle_size_range,
+                obstacle_height_range=(2.4, 2.5),
+                floaters_size_range=self.cfg.floater_size_range,
+                floaters_height_range=(0.3, 1.7),
             )
 
-            # Reward for encouraging drones to approach the goal
-            dist_to_goal = torch.linalg.norm(self.goals[agent] - self.robots[agent].data.root_pos_w, dim=1)
-            approaching_goal_reward = self.prev_dist_to_goals[agent] - dist_to_goal
-            self.prev_dist_to_goals[agent] = dist_to_goal
+            # Store the new map data
+            self._map_data[inactive_map_id] = env_data
 
-            # Additional reward when the drone is close to goal
-            success_i = dist_to_goal < self.success_dist_thr
-            success_reward = torch.where(
-                success_i,
-                torch.ones(self.num_envs, device=self.device),
-                torch.zeros(self.num_envs, device=self.device),
+            # Swap active/inactive maps
+            self._active_map_id = inactive_map_id
+
+            # Update current environment references to use new active map
+            self.occ_kdtree = env_data["kdtree"]
+            self.free_points = env_data["free_points"]
+            self._map_generation_timer = 0  # Reset timer after regeneration
+
+
+            # 深度相机重新加载地图网格
+            self._depth_cameras.reload_cameras()
+
+
+            # # Request mesh reload for all ray-casting cameras after terrain regeneration
+            # cameras_to_reload = []
+            # # Request mesh reload for all cameras
+            # for sensor_name, camera_desc in cameras_to_reload:
+            #     if hasattr(self.scene.sensors[sensor_name], 'request_mesh_reload'):
+            #         self.scene.sensors[sensor_name].request_mesh_reload()
+            #         print(f"Requested mesh reload for {camera_desc}")
+            #     else:
+            #         print(f"Warning: {camera_desc} does not support mesh reloading")
+
+            self._point_provider = PointProvider(
+                self.cfg.point_provider,
+                self,
+                self.free_points,
             )
 
-            death_reward = -torch.where(
-                self.died[agent],
-                torch.ones(self.num_envs, device=self.device),
-                torch.zeros(self.num_envs, device=self.device),
-            )
+            print(f"Map regeneration complete. New active map: {self._active_map_id}")
 
-            # Smoothing
-            ang_vel_reward = -torch.linalg.norm(self.robots[agent].data.root_ang_vel_w, dim=1)
-            action_norm_reward = -torch.linalg.norm(self.actions[agent], dim=1)
-            action_norm_near_goal_reward = torch.where(
-                success_i,
-                -torch.linalg.norm(self.actions[agent], dim=1),
-                torch.zeros(self.num_envs, device=self.device),
-            )
-            action_diff_reward = -torch.linalg.norm(self.actions[agent] - self.prev_actions[agent], dim=1)
-            self.prev_actions[agent] = self.actions[agent].clone()
+        finally:
+            self._map_regeneration_in_progress = False
 
-            reward = {
-                "meaning_to_live": torch.ones(self.num_envs, device=self.device) * self.cfg.to_live_reward_weight * self.step_dt,
-                "approaching_goal": approaching_goal_reward * self.cfg.approaching_goal_reward_weight * self.step_dt,
-                "success": success_reward * self.cfg.success_reward_weight * self.step_dt,
-                "death_penalty": death_reward * self.cfg.death_penalty_weight,
-                "mutual_collision_penalty": mutual_collision_reward * self.cfg.mutual_collision_penalty_weight * self.step_dt,
-                "mutual_collision_avoidance_soft_penalty": mutual_collision_avoidance_soft_reward
-                * self.cfg.mutual_collision_avoidance_soft_penalty_weight
-                * self.step_dt,
-                "ang_vel_penalty": ang_vel_reward * self.cfg.ang_vel_penalty_weight * self.step_dt,
-                "action_norm_penalty": action_norm_reward * self.cfg.action_norm_penalty_weight * self.step_dt,
-                "action_norm_near_goal_penalty": action_norm_near_goal_reward * self.cfg.action_norm_near_goal_penalty_weight * self.step_dt,
-                "action_diff_penalty": action_diff_reward * self.cfg.action_diff_penalty_weight * self.step_dt,
+
+
+
+    # def _update_curriculum(self):
+    #     if not hasattr(self, "_success_rate"):
+    #         return
+    #     if self._success_rate > 0.9:
+    #         span = max(self.cfg.hover_hold_max_s - self.cfg.hover_hold_initial_s, 0.0)
+    #         desired_requirement = self.cfg.hover_hold_initial_s + span * self._success_rate
+    #         desired_requirement = min(self.cfg.hover_hold_max_s, desired_requirement)
+    #         if desired_requirement > self._hover_hold_requirement_s:
+    #             step = min(self.cfg.hover_hold_increment_s, desired_requirement - self._hover_hold_requirement_s)
+    #             self._hover_hold_requirement_s += step
+    #             print(f"CURRICULUM: Raising hover hold to {self._hover_hold_requirement_s:.2f}s (success rate {self._success_rate:.3f})")
+
+    #         if self.cfg.obstacle_min_distance_init > self.cfg.obstacle_min_distance_min:
+    #             new_min_dist = self.cfg.obstacle_min_distance_init / 1.1
+    #             self.cfg.obstacle_min_distance_init = max(new_min_dist, self.cfg.obstacle_min_distance_min)
+    #             print(f"CURRICULUM: Success rate {self._success_rate:.3f} > 0.9, reducing obstacle min distance to {self.cfg.obstacle_min_distance_init:.3f}")
+    #         else:
+    #             self.cfg.reward_coef_vel_speed_excess_penalty = 0.6
+    #             self.cfg.reward_coef_vel_speed_match_reward = 0.2
+    #             print(f"CURRICULUM: Success rate {self._success_rate:.3f} > 0.9, setting vel speed excess penalty to {self.cfg.reward_coef_vel_speed_excess_penalty:.3f}")
+
+
+
+
+    # TODO: 考虑抽象为多地图管理器对象
+    def _get_current_map_data(self, map_id=None):
+        """Get map data for specified map ID or current active map."""
+        if map_id is None:
+            map_id = self._active_map_id
+
+        if self._map_data[map_id] is not None:
+            return self._map_data[map_id]
+        else:
+            # Fallback to current global data
+            return {
+                "kdtree": self.occ_kdtree,
+                "free_points": self.free_points
             }
 
-            # Logging
-            for key, value in reward.items():
-                if key in self.episode_sums:
-                    self.episode_sums[key] += value / self.cfg.num_drones
-                else:
-                    self.episode_sums[key] = value / self.cfg.num_drones
 
-            reward = torch.sum(torch.stack(list(reward.values())), dim=0)
 
-            rewards[agent] = reward
-        return rewards
 
-    def _reset_idx(self, env_ids: Sequence[int] | torch.Tensor | None):
+    def _pre_physics_step(self, actions: torch.Tensor):
+        # self._noise_10_cfg.func(actions, self._noise_10_cfg)
+        # TODO: 1、确认返回的 action 是否已经被处理到 [-1, 1]；
+        #       2、思考把 action 剪裁放在 rl 库还是这里哪个更好（rl算法优化用 action 分布和剪裁后分布不一致）
+        #       3、思考选择 tanh 还是 clip 哪个更好（如果刚才分布不一致问题无法解决的话）
+        self._actions.copy_(actions)    # 原地复制 action
+        self._actions.tanh_()           # 原地tanh，将 action 平滑限幅到[-1, 1]
+        # self._actions.clamp_(-1.0, 1.0)
+
+        # action 映射到低层控制器输入
+        self._thrust_desired.copy_(self._actions[:, 0:1]).add_(1.0).mul_(0.5).mul_(self._thrust_max)    # thrust: ((a+1)*0.5*thrust_max)
+        self._bodyrate_desired.copy_(self._actions[:, 1:]).mul_(self._bodyrate_max)                     # bodyrate: a * bodyrate_max
+
+
+
+
+    def _apply_action(self):
+        """Apply thrust/moment to the quadcopter."""
+
+        # TODO: 优化 action delay 逻辑（加入随机延迟时间等）
+        # if not hasattr(self, "_action_delay_buffer"):
+        #     # Initialize buffer with zeros for each environment
+        #     default_action = torch.zeros((self.num_envs, 4), device=self.device)
+        #     default_action[:, 2] = 0.5  # Set yaw rate to 0.5 for all environments
+        #     self._action_delay_buffer = collections.deque(
+        #         [default_action.clone() for _ in range(self.cfg.action_delay_steps + 1)],
+        #         maxlen=self.cfg.action_delay_steps + 1
+        #     )
+        # self._action_delay_buffer.append(self._actions.clone())
+        # delayed_actions = self._action_delay_buffer[0]
+
+        self._forces.zero_()
+        self._torques.zero_()
+        self._forces[:, 0, 2:3]  = self._thrust_desired
+        self._torques[:, 0, :] = bodyrate_control_without_thrust(
+            self._robot.data.root_ang_vel_b,
+            self._bodyrate_desired,
+            self._robot_inertia,
+            self._controller_kp_bodyrate
+        )
+
+        # TODO: 待测试并加入油门不确定度、风扰动
+        # # Apply thrust uncertainty if enabled
+        # if self._thrust_uncertainty is not None:
+        #     thrust_effectiveness = self._thrust_uncertainty.step()
+        #     self._forces[:, 0, 2] *= thrust_effectiveness
+        # # Apply wind disturbances
+        # wind_acc = self._wind_gen.step()                       # (num_envs,3) m/s²
+        # self.wind_acc_log[(self._sim_step_counter - 1) % self.cfg.decimation] = wind_acc
+        # wind_force_world = wind_acc * self._robot_mass.unsqueeze(1)  # (num_envs,3) N
+        # quat_w = self._robot.data.root_quat_w  # quaternion representing rotation from body to world
+        # rot_matrices_w2b = matrix_from_quat(quat_w).transpose(1, 2)  # shape: (num_envs, 3, 3)
+        # wind_force_body = torch.bmm(rot_matrices_w2b, wind_force_world.unsqueeze(2)).squeeze(2)
+        # self._forces[:, 0, :] += wind_force_body
+        # # print(f"original force: {self._forces[0, 0, :]}")
+        # # print(f"Wind force: {wind_force_body[0]}")
+        # # print(f"Controller compute time: {start.elapsed_time(end)} ms")
+        # # print(f"Env[0] - Action: {self._actions[0]}")
+        # # print(f"Env[0] - Force: {self._forces[0]}, Torque: {self._torques[0]}")
+
+        self._robot.set_external_force_and_torque(self._forces, self._torques, body_ids=self._body_id)
+
+
+
+
+    def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """Define terminations and timeouts."""
+
+        # -------------------------
+        # 计算各类结束条件
+        # -------------------------
+        # 计算回合超时的 env
+        time_out = self.episode_length_buf >= self.max_episode_length - 1
+
+        # 计算发生碰撞的 env
+        net_forces = self._contact_sensor.data.net_forces_w_history  # (N, T, B, 3)
+        selected = net_forces[:, :, self._undesired_contact_ids, :]  # (N, T, K, 3)
+        max_contact, _ = torch.norm(selected, dim=-1).max(dim=1)     # (N, K)
+        self._is_contact = (max_contact > self.cfg.contact_force_threshold).any(dim=1)  # Threshold is important for REAL contact detection
+
+        # -------------------------
+        # 计算总结束条件
+        # -------------------------
+        terminated_numerical = self._numerical_instability
+        # TODO: TEMPORARY DISABLE COLLISION TERMINATION
+        terminated_collision = self._is_contact
+        # terminated_collision = torch.zeros_like(self._is_contact)
+        terminated_success   = self._is_success
+
+        terminated = terminated_numerical | terminated_collision | terminated_success
+
+        # -------------------------
+        # 记录回合结束原因到日志（本 step 内“将要结束”的 env 统计）
+        # -------------------------
+        # 构造互斥的结束原因（按优先级：success > collision > numerical > timeout）
+        end_success   = terminated_success
+        end_collision = terminated_collision & ~end_success
+        end_numerical = terminated_numerical & ~(end_success | end_collision)
+        end_timeout   = time_out & ~(end_success | end_collision | end_numerical)
+        end_total     = end_success | end_collision | end_numerical | end_timeout
+        # 计算统计量
+        end_total_count = end_total.sum().to(torch.float32)
+        zero = torch.zeros_like(end_total_count)
+        succ_ratio = torch.where(end_total_count > 0, end_success.float().sum() / end_total_count, zero)
+        collision_ratio = torch.where(end_total_count > 0, end_collision.float().sum() / end_total_count, zero)
+        numerical_ratio = torch.where(end_total_count > 0, end_numerical.float().sum() / end_total_count, zero)
+        timeout_ratio = torch.where(end_total_count > 0, end_timeout.float().sum() / end_total_count, zero)
+        # 记录到日志
+        self.extras["log"].update({
+            # count（数量）
+            "End / Total (count)"    : end_total_count,
+            "End / Success (count)"  : end_success.sum().to(torch.float32),
+            "End / Collision (count)": end_collision.sum().to(torch.float32),
+            "End / Numerical (count)": end_numerical.sum().to(torch.float32),
+            "End / Timeout (count)"  : end_timeout.sum().to(torch.float32),
+            # ratio（比例）
+            "End / Success (ratio)"  : succ_ratio,
+            "End / Collision (ratio)": collision_ratio,
+            "End / Numerical (ratio)": numerical_ratio,
+            "End / Timeout (ratio)"  : timeout_ratio,
+        })
+
+        return terminated, time_out
+
+
+
+
+    def _get_rewards(self) -> torch.Tensor:
+        """
+        Calculate the reward for each environment.
+        """
+
+        reward_cfg = self.cfg.reward
+        robot_data = self._robot.data
+
+        # Current position, orientation, and velocity of the robot
+        pos_w = robot_data.root_state_w[:, :3]
+        rot_E_w = torch.stack(euler_xyz_from_quat(robot_data.root_state_w[:, 3:7]), dim=1)
+        rot_E_w = torch.stack([normallize_angle(rot_E_w[:, 0]), normallize_angle(rot_E_w[:, 1]), normallize_angle(rot_E_w[:, 2])], dim=1)
+        vel_b = robot_data.root_lin_vel_b
+
+
+        goal_completion_mask, _ = self._point_provider.update()
+        self._desired_pos_w.copy_(self._point_provider.get_target_points())
+
+
+        # ----------------------------------------
+        # 计算每项奖励和惩罚
+        # ----------------------------------------
+        # TODO: 重新思考抵达目标点+保持期望速度的奖励机制（比如可参考 “Extreme Parkour” 文章的内积设计）
+        # distance to goal center
+        distance_to_gap = (pos_w - self._desired_pos_w).norm(dim=1)
+        last_distance_to_gap = (self._last_pos_w - self._desired_pos_w).norm(dim=1)
+        delta_distance = last_distance_to_gap - distance_to_gap
+        distance_reward = torch.clamp(delta_distance / reward_cfg.delta_distance_clamp, min=-1.0, max=1.0)
+
+        # TODO: 重新思考抵达目标点+保持期望速度的奖励机制（比如可参考 “Extreme Parkour” 文章的内积设计）
+        # direction penalty [-2, 0]
+        # (We define a "forward" direction as +X in world space for illustration.)
+        rot_M_w = matrix_from_quat(robot_data.root_quat_w)
+        dir_body_w = rot_M_w[:, 0:2, 0] / (rot_M_w[:, 0:2, 0].norm(dim=1, keepdim=True) + 1e-6)  # Forward direction in world frame
+        dir_to_goal = (self._desired_pos_w - pos_w)[:, :2]
+        dir_to_goal = dir_to_goal / (dir_to_goal.norm(dim=-1, keepdim=True) + 1e-6)
+        yaw_direction_penalty = (dir_body_w * dir_to_goal).sum(dim=-1) - 1.0
+
+        # action magnitude penalty [-6, 0]
+        # shape is (num_envs, 4) -> thrust + rates
+        # Apply different weights to each action dimension for magnitude calculation
+        action_weights = torch.tensor([1.0, 1.0, 1.0, 1.0], device=self.device)  # [thrust, bodyrate(x, y, z)] # TODO set action_weights to 0
+        weighted_actions = self._actions * action_weights
+        action_magnitude_penalty = -weighted_actions.norm(dim=1)
+
+        # action change penalty (difference relative to last actions) [-4, 0]
+        diff_actions = self._actions - self._last_actions
+        # Apply different weights to each action dimension
+        action_weights = torch.tensor([1.0, 1.0, 1.0, 1.0], device=self.device)  # [thrust, bodyrate(x, y, z)]
+        weighted_diff_actions = diff_actions * action_weights
+        action_change_penalty = -weighted_diff_actions.norm(dim=1)
+
+        # Velocity-related rewards and penalties - now separated into individual components
+        speed = vel_b.norm(dim=1)
+        distance_to_goal = (pos_w - self._desired_pos_w).norm(dim=1)
+
+        # TODO: 重新思考抵达目标点+保持期望速度的奖励机制（比如可参考 “Extreme Parkour” 文章的内积设计）
+        # TODO: 评估全向视野感知下是否需要加入速度方向奖励
+        # Velocity direction penalty [-inf, 0]
+        # Penalize deviations from forward (+X body axis) scaled by speed, shaped with Huber loss
+        safe_speed = torch.clamp(speed, min=1e-6)
+        cos_forward = torch.clamp(vel_b[:, 0] / safe_speed, -1.0, 1.0)
+        direction_misalignment = speed * (1.0 - cos_forward)
+        vel_dir_delta = max(reward_cfg.vel_direction_huber_delta, 1e-6)
+        vel_dir_delta_tensor = torch.tensor(vel_dir_delta, device=self.device, dtype=direction_misalignment.dtype)
+        quadratic_region = 0.5 * direction_misalignment.square() / vel_dir_delta_tensor
+        linear_region = direction_misalignment - 0.5 * vel_dir_delta_tensor
+        vel_direction_penalty = -torch.where(direction_misalignment <= vel_dir_delta_tensor, quadratic_region, linear_region)
+
+        # Adjust desired speed based on distance to goal
+        # Linearly decrease speed when within distance threshold of goal
+        speed_adjust_start = reward_cfg.speed_adjustment_distance  # Start slowing down
+        speed_adjust_end = 0.0   # Speed should be zero
+        slowdown_factor = torch.clamp((speed_adjust_start - distance_to_goal) / (speed_adjust_start - speed_adjust_end), 0.0, 1.0)
+        yaw_direction_penalty = yaw_direction_penalty * (1.0 - slowdown_factor)
+        yaw_direction_penalty = torch.where(
+            distance_to_goal < self.cfg.hover_yaw_penalty_distance,
+            torch.zeros_like(yaw_direction_penalty),
+            yaw_direction_penalty,
+        )
+
+
+        # TODO: 可以抽象为目标管理对象
+        # Adjust desired speed: original speed when far, 0 when at goal
+        desired_speed = self._desired_speed_init.squeeze(-1) * (1.0 - slowdown_factor)
+        self._desired_speed = desired_speed.unsqueeze(-1)  # Ensure it's a column vector
+
+
+        # Speed magnitude penalty [-5, 0]
+        # Penalize when speed exceeds desired speed (now using adjusted desired_speed)
+        vel_speed_excess_penalty = torch.where(
+            speed > desired_speed,
+            -torch.clamp(torch.exp((speed - desired_speed) * 5) - 1.0, max=5.0),
+            torch.zeros_like(speed)
+        )
+
+        # TODO: 重新思考抵达目标点+保持期望速度的奖励机制（比如可参考 “Extreme Parkour” 文章的内积设计）
+        # Velocity matching reward [0, 2]
+        # Reward for having speed close to desired speed (now using adjusted desired_speed)
+        vel_speed_match_reward = torch.exp(-5.0 * torch.abs(speed - desired_speed)) * 2.0
+
+        # z position penalty shaped with Huber loss [-5, 0]
+        z_pos = pos_w[:, 2]
+        z_err = z_pos - self._desired_pos_w[:, 2]
+        delta = max(reward_cfg.z_position_huber_delta, 1e-6)
+        delta_tensor = torch.tensor(delta, device=self.device, dtype=z_pos.dtype)
+        abs_z_err = torch.abs(z_err)
+        quadratic_region = 0.5 * abs_z_err.square() / delta_tensor
+        linear_region = abs_z_err - 0.5 * delta_tensor
+        z_position_penalty = -torch.where(abs_z_err <= delta_tensor, quadratic_region, linear_region)
+
+        # collision penalty. [-1, 0]
+        obstacle_collision_penalty = torch.where(
+            self._is_contact,
+            torch.ones_like(vel_b[:, 0]),
+            torch.zeros_like(vel_b[:, 0]),
+        )
+        obstacle_collision_penalty = -obstacle_collision_penalty
+
+        # # Perform KD-tree query once to get nearest obstacle distances
+        # nearest_obstacle_distances = None
+        # if self.occ_kdtree is not None:
+        #     d, _ = self.occ_kdtree.query(pos_w.cpu(), workers=-1, distance_upper_bound=4.0)
+        #     nearest_obstacle_distances = torch.tensor(d, dtype=pos_w.dtype, device=self.device)
+
+        # # ESDF-based reward
+        # esdf_reward = torch.zeros_like(vel_b[:, 0])
+        # if nearest_obstacle_distances is not None:
+        #     safe_threshold = 0.5
+        #     esdf_reward = torch.where(
+        #         nearest_obstacle_distances < safe_threshold,
+        #         -(torch.exp(5.0 * (safe_threshold - nearest_obstacle_distances)) - 1.0),
+        #         torch.zeros_like(nearest_obstacle_distances),
+        #     )
+
+
+        # Succeed reward [0, 1] - only for individual goal completion
+        succeed_reward = goal_completion_mask.float()
+
+        # Angular velocity penalty
+        max_angular_velocity = reward_cfg.max_angular_velocity_penalty # rad/s
+        ang_vel_b = robot_data.root_ang_vel_b.clone() # (num_envs, 3)
+        max_ang_vel_penalty = torch.where(
+            torch.abs(ang_vel_b) > max_angular_velocity,
+            -torch.clamp(torch.exp(torch.abs(torch.abs(ang_vel_b) - max_angular_velocity)) - 1.0, max=10.0),
+            torch.zeros_like(ang_vel_b),
+        ) # (num_envs, 3) -> (num_envs,)
+        max_ang_vel_penalty = torch.sum(max_ang_vel_penalty, dim=1)
+
+        # Angle penalty [-20, 0]
+        max_angle = reward_cfg.max_angle_penalty # rad
+        max_angle_penalty = torch.where(
+            torch.abs(rot_E_w[:, :2]) > max_angle,
+            -torch.clamp(torch.exp(torch.abs(torch.abs(rot_E_w[:, :2]) - max_angle)) - 1.0, max=10.0),
+            torch.zeros_like(rot_E_w[:, :2]),
+        )
+        max_angle_penalty = torch.sum(max_angle_penalty, dim=1)
+
+        # TODO: 审查 z_vel 惩罚的设置意图；注意此处坐标系选取是在 body 系下，是否需要换到 world 系下？
+        # z velocity penalty [-1, 0]
+        z_vel_diff = torch.abs(vel_b[:, 2])
+        z_vel_penalty = -torch.clamp(z_vel_diff, max=1.0)
+
+        # TODO: 不置 0 可能会导致拖延完成任务时间
+        # Alive reward (before collision) [0, 1]
+        alive_reward = torch.logical_not(torch.logical_or(self._is_success, self._is_contact)).float()
+
+        # # TODO: 意图不名，是惩罚吗？
+        # lin_vel = torch.sum(torch.square(robot_data.root_lin_vel_b), dim=1)
+        # ang_vel = torch.sum(torch.square(robot_data.root_ang_vel_b), dim=1)
+
+        # # TODO: 重新思考抵达目标点+保持期望速度的奖励机制（比如可参考 “Extreme Parkour” 文章的内积设计）
+        # distance_to_goal_mapped = 1 - torch.tanh(distance_to_goal / reward_cfg.distance_goal_mapping_scale)
+
+        # ----------------------------------------
+        # 计算总奖励，并记录各项奖励到日志
+        # ----------------------------------------
+        reward_specs = [
+            ("distance_reward",            distance_reward,            reward_cfg.coef_distance_reward),
+            ("yaw_direction_penalty",      yaw_direction_penalty,      reward_cfg.coef_yaw_direction_penalty),
+            ("action_magnitude_penalty",   action_magnitude_penalty,   reward_cfg.coef_action_magnitude_penalty),
+            ("action_change_penalty",      action_change_penalty,      reward_cfg.coef_action_change_penalty),
+            ("vel_direction_penalty",      vel_direction_penalty,      reward_cfg.coef_vel_direction_penalty),
+            ("vel_speed_excess_penalty",   vel_speed_excess_penalty,   reward_cfg.coef_vel_speed_excess_penalty),
+            ("vel_speed_match_reward",     vel_speed_match_reward,     reward_cfg.coef_vel_speed_match_reward),
+            ("z_position_penalty",         z_position_penalty,         reward_cfg.coef_z_position_penalty),
+            ("obstacle_collision_penalty", obstacle_collision_penalty, reward_cfg.coef_obstacle_collision_penalty),
+            # ("esdf_reward",                esdf_reward,                reward_cfg.coef_esdf_reward),
+            ("succeed_reward",             succeed_reward,             reward_cfg.coef_succeed_reward),
+            ("max_ang_vel_penalty",        max_ang_vel_penalty,        reward_cfg.coef_max_ang_vel_penalty),
+            ("max_angle_penalty",          max_angle_penalty,          reward_cfg.coef_max_angle_penalty),
+            ("alive_reward",               alive_reward,               reward_cfg.coef_alive_reward),
+            ("z_vel_penalty",              z_vel_penalty,              reward_cfg.coef_z_vel_penalty),
+            # ("lin_vel_reward",             lin_vel,                    reward_cfg.coef_lin_vel_reward_scale),
+            # ("ang_vel_reward",             ang_vel,                    reward_cfg.coef_ang_vel_reward_scale),
+            # ("distance_to_goal_reward",    distance_to_goal_mapped,    reward_cfg.coef_distance_to_goal_reward_scale),
+        ]
+        # 剔除权重为0的项
+        reward_specs = [(n, t, w) for (n, t, w) in reward_specs if w != 0.0]
+        # 提取各项奖励名称、原始数值和权重
+        names = [n for n, _, _ in reward_specs]
+        raw_terms = torch.stack([t for _, t, _ in reward_specs], dim=1)  # (N, K)
+        weights = raw_terms.new_tensor([w for _, _, w in reward_specs])  # (K,) 自动对齐 device/dtype
+        # 计算加权奖励、总和、均值
+        weighted_terms = raw_terms * weights        # (N, K)
+        reward_per_env = weighted_terms.sum(dim=1)  # (N,)
+        mean_weighted_terms = weighted_terms.mean(dim=0)  # (K,)
+        reward_env_mean   = reward_per_env.mean()         # scalar
+        # 记录到日志（skrl会自动处理无前缀 log name，加上 Info / 前缀）
+        self.extras["log"].update({f"{names[i]}": mean_weighted_terms[i] for i in range(len(names))})
+        self.extras["log"]["total"] = reward_env_mean
+
+        # ----------------------------------------
+        # 更新 “上一时刻” 数据
+        # ----------------------------------------
+        self._last_pos_w.copy_(pos_w)
+        self._last_actions.copy_(self._actions)
+
+        return reward_per_env
+
+
+
+
+    def _reset_idx(self, env_ids: torch.Tensor | None):
+        """Reset specific environment indexes."""
+
         if env_ids is None or len(env_ids) == self.num_envs:
-            env_ids = self.robots["drone_0"]._ALL_INDICES
+            env_ids = self._robot._ALL_INDICES
 
-        # Logging
-        extras = dict()
-        for key in self.episode_sums.keys():
-            episodic_sum_avg = torch.mean(self.episode_sums[key][env_ids])
-            extras["Mean_Epi_Reward_of_Reset_Envs/" + key] = episodic_sum_avg
-            self.episode_sums[key][env_ids] = 0.0
-        self.extras["log"] = dict()
-        self.extras["log"].update(extras)
+        # TODO: 考虑抽象为多地图管理器对象
+        # Always call regenerate terrain on reset to maintain map data
+        self._regenerate_terrain()
 
-        for agent in self.possible_agents:
-            self.robots[agent].reset(env_ids)
 
+        # TODO: 待测试并加入油门不确定度、风扰动
+        # # Reset wind generator for the environments being reset
+        # self._wind_gen.reset(env_ids)
+        # # Reset thrust uncertainty for the environments being reset
+        # if self._thrust_uncertainty is not None:
+        #     self._thrust_uncertainty.reset(env_ids)
+
+
+        # Reset height randomizer later after initial positions are set
+
+        # Determine episode outcomes for completed episodes
+        success_mask = self._is_success[env_ids]
+        died_mask = torch.logical_and(self.reset_terminated[env_ids], ~success_mask)
+        timed_out_mask = self.reset_time_outs[env_ids]
+
+
+        # TODO: 考虑抽象为回合评估统计对象
+        # Update episode outcomes and metrics
+        # self._update_episode_outcomes_and_metrics(env_ids, success_mask, died_mask, timed_out_mask)
+
+
+        # Reset environment states
+        self._robot.reset(env_ids)
+        # Parent method sets done buffers, etc.
         super()._reset_idx(env_ids)
-        if self.num_envs > 13 and len(env_ids) == self.num_envs:
-            # Spread out the resets to avoid spikes in training when many environments reset at a similar time
-            self.episode_length_buf = torch.randint_like(self.episode_length_buf, high=int(self.max_episode_length))
-
-        # Randomly assign missions to reset envs
-        self.env_mission_ids[env_ids] = torch.multinomial(self.mission_prob, num_samples=len(env_ids), replacement=True)
-        mission_0_ids = env_ids[self.env_mission_ids[env_ids] == 0]  # The migration mission
-        mission_1_ids = env_ids[self.env_mission_ids[env_ids] == 1]  # The crossover mission
-        mission_2_ids = env_ids[self.env_mission_ids[env_ids] == 2]  # The chaotic mission
-
-        self.success_dist_thr[mission_0_ids] = self.cfg.success_distance_threshold * self.cfg.num_drones / 1.414
-        self.success_dist_thr[mission_1_ids] = self.cfg.success_distance_threshold
-        self.success_dist_thr[mission_2_ids] = self.cfg.success_distance_threshold
-
-        ### ============= Reset robot state and specify goal ============= ###
-        start = time.perf_counter()
-        # The migration mission: huddled init states + unified random target
-        if len(mission_0_ids) > 0:
-            rg = self.cfg.flight_range - self.success_dist_thr[mission_0_ids][0]
-
-            if self.cfg.use_custom_traj:
-                # Randomly select a trajectory from the library
-                self.custom_traj_exec_indexs[mission_0_ids] = torch.randint(0, self.cfg.num_custom_trajs, (len(mission_0_ids),), device=self.device)
-                self.custom_traj_exec_timesteps[mission_0_ids] = torch.zeros(len(mission_0_ids), device=self.device)
-                self.unified_goal_xy[mission_0_ids] = torch.zeros(len(mission_0_ids), 2, device=self.device)
-            else:
-                self.unified_goal_xy[mission_0_ids] = torch.zeros(len(mission_0_ids), 2, device=self.device).uniform_(-rg, rg)
-
-            rand_init_p_mis0 = torch.zeros(len(mission_0_ids), self.cfg.num_drones, 2, device=self.device)
-            done = torch.zeros(len(mission_0_ids), dtype=torch.bool, device=self.device)
-
-            for attempt in range(5 * self.cfg.max_sampling_tries):
-                active = ~done
-                if not torch.any(active):
-                    break
-
-                active_ids = active.nonzero(as_tuple=False).squeeze(-1)
-                init_p = (torch.rand(active_ids.numel(), self.cfg.num_drones, 2, device=self.device) * 2 - 1) * rg  # [num_active, num_drones, 2]
-                rand_init_p_mis0[active_ids] = init_p
-                dmat = torch.cdist(init_p, init_p)  # [num_active, num_drones, num_drones]
-                eye = torch.eye(self.cfg.num_drones, dtype=torch.bool, device=self.device).expand(active_ids.numel(), -1, -1)
-                dmat.masked_fill_(eye, float("inf"))
-                dmin = dmat.amin(dim=(-2, -1))  # [num_active]
-
-                ok = dmin > self.cfg.collide_dist
-                if torch.any(ok):
-                    done[active_ids[ok]] = True
-
-            if torch.any(~done):
-                failed_ids = mission_0_ids[~done].tolist()
-                logger.warning(
-                    f"The search for initial positions of the swarm meeting constraints within a side-length {2 * rg} box failed for envs {failed_ids}, using the final sample #_#"
-                )
-
-        # The crossover mission: init states on a circle + target on the opposite side
-        if len(mission_1_ids) > 0:
-            r_max = self.cfg.flight_range - self.success_dist_thr[mission_1_ids][0] - 0.25
-            if self.cfg.fix_range:
-                r_min = r_max
-            else:
-                r_min = r_max / 1.5
-
-            rand_r = torch.rand(len(mission_1_ids), device=self.device) * (r_max - r_min) + r_min
-            ang = torch.empty((len(mission_1_ids), self.cfg.num_drones), device=self.device)
-
-            if torch.rand((), device=self.device) < self.cfg.uniformly_distributed_prob:
-                N = self.cfg.num_drones
-                base = torch.arange(N, dtype=torch.float32, device=self.device) * (2 * math.pi / N)
-                rot = torch.rand(len(mission_1_ids), 1, device=self.device) * (2 * math.pi)
-                ang_ = (base.unsqueeze(0).expand(len(mission_1_ids), -1) + rot) % (2 * math.pi)
-                perms = torch.argsort(torch.rand(len(mission_1_ids), N, device=self.device), dim=1)
-                ang = torch.gather(ang_, dim=1, index=perms)
-
-            else:
-                done = torch.zeros(len(mission_1_ids), dtype=torch.bool, device=self.device)
-                for attempt in range(5 * self.cfg.max_sampling_tries):
-                    active = ~done
-                    if not torch.any(active):
-                        break
-
-                    active_ids = active.nonzero(as_tuple=False).squeeze(-1)
-                    ang_ = torch.rand((active_ids.numel(), self.cfg.num_drones), device=self.device) * 2 * math.pi
-                    ang[active_ids] = ang_
-                    r = rand_r[active_ids].unsqueeze(-1)
-
-                    pts = torch.stack([torch.cos(ang_) * r, torch.sin(ang_) * r], dim=-1)  # [num_active, num_drones, 2]
-                    dmat = torch.cdist(pts, pts)  # [num_active, num_drones, num_drones]
-                    eye = torch.eye(self.cfg.num_drones, dtype=torch.bool, device=self.device).expand(active_ids.numel(), -1, -1)
-                    dmat.masked_fill_(eye, float("inf"))
-                    dmin = dmat.amin(dim=(-2, -1))  # [num_active]
-
-                    ok = dmin > self.cfg.collide_dist
-                    if torch.any(ok):
-                        done[active_ids[ok]] = True
-
-                if torch.any(~done):
-                    failed_ids = mission_1_ids[~done].tolist()
-                    logger.warning(
-                        f"The search for initial positions of the swarm meeting constraints on a circle failed for envs {failed_ids}, using the final sample #_#"
-                    )
-
-            self.rand_r[mission_1_ids] = rand_r
-            self.ang[mission_1_ids] = ang
-
-        # The chaotic mission: random init states + respective random target
-        if len(mission_2_ids) > 0:
-            rg = self.cfg.flight_range - self.success_dist_thr[mission_2_ids][0] - 0.25
-
-            rand_init_p_mis2 = torch.zeros(len(mission_2_ids), self.cfg.num_drones, 2, device=self.device)
-            done = torch.zeros(len(mission_2_ids), dtype=torch.bool, device=self.device)
-
-            for attempt in range(5 * self.cfg.max_sampling_tries):
-                active = ~done
-                if not torch.any(active):
-                    break
-
-                active_ids = active.nonzero(as_tuple=False).squeeze(-1)
-                init_p = (torch.rand(active_ids.numel(), self.cfg.num_drones, 2, device=self.device) * 2 - 1) * rg  # [num_active, num_drones, 2]
-                rand_init_p_mis2[active_ids] = init_p
-                dmat = torch.cdist(init_p, init_p)  # [num_active, num_drones, num_drones]
-                eye = torch.eye(self.cfg.num_drones, dtype=torch.bool, device=self.device).expand(active_ids.numel(), -1, -1)
-                dmat.masked_fill_(eye, float("inf"))
-                dmin = dmat.amin(dim=(-2, -1))  # [num_active]
-
-                ok = dmin > self.cfg.collide_dist
-                if torch.any(ok):
-                    done[active_ids[ok]] = True
-
-            if torch.any(~done):
-                failed_ids = mission_2_ids[~done].tolist()
-                logger.warning(
-                    f"The search for initial positions of the swarm meeting constraints within a side-length {2 * rg} box failed for envs {failed_ids}, using the final sample #_#"
-                )
-
-            rand_goal_p = torch.zeros(len(mission_2_ids), self.cfg.num_drones, 2, device=self.device)
-            done = torch.zeros(len(mission_2_ids), dtype=torch.bool, device=self.device)
-
-            for attempt in range(self.cfg.max_sampling_tries):
-                active = ~done
-                if not torch.any(active):
-                    break
-
-                active_ids = active.nonzero(as_tuple=False).squeeze(-1)
-                goal_p = (torch.rand(active_ids.numel(), self.cfg.num_drones, 2, device=self.device) * 2 - 1) * rg  # [num_active, num_drones, 2]
-                rand_goal_p[active_ids] = goal_p
-                dmat = torch.cdist(goal_p, goal_p)  # [num_active, num_drones, num_drones]
-                eye = torch.eye(self.cfg.num_drones, dtype=torch.bool, device=self.device).expand(active_ids.numel(), -1, -1)
-                dmat.masked_fill_(eye, float("inf"))
-                dmin = dmat.amin(dim=(-2, -1))  # [num_active]
-
-                ok = dmin > self.cfg.collide_dist
-                if torch.any(ok):
-                    done[active_ids[ok]] = True
-
-            if torch.any(~done):
-                failed_ids = mission_2_ids[~done].tolist()
-                logger.warning(
-                    f"The search for goal positions of the swarm meeting constraints within a side-length {2 * rg} box failed for envs {failed_ids}, using the final sample #_#"
-                )
-
-        end = time.perf_counter()
-        logger.debug(f"Random search for initial and goal positions takes {end - start:.5f}s")
-
-        for i, agent in enumerate(self.possible_agents):
-            init_state = self.robots[agent].data.default_root_state.clone()
-
-            if len(mission_0_ids) > 0:
-                init_state[mission_0_ids, :2] = rand_init_p_mis0[:, i]
-                self.goals[agent][mission_0_ids, :2] = self.unified_goal_xy[mission_0_ids].clone()
-
-            if len(mission_1_ids) > 0:
-                ang = self.ang[mission_1_ids, i]
-                r = self.rand_r[mission_1_ids].unsqueeze(-1)
-
-                init_state[mission_1_ids, :2] = torch.stack([torch.cos(ang), torch.sin(ang)], dim=1) * r
-
-                ang += math.pi  # Terminate angles
-                self.goals[agent][mission_1_ids, :2] = torch.stack([torch.cos(ang), torch.sin(ang)], dim=1) * r
-
-            if len(mission_2_ids) > 0:
-                init_state[mission_2_ids, :2] = rand_init_p_mis2[:, i]
-                self.goals[agent][mission_2_ids, :2] = rand_goal_p[:, i]
-
-            init_state[env_ids, 2] = float(self.cfg.flight_altitude)
-            init_state[env_ids, :3] += self.terrain.env_origins[env_ids]
-
-            self.robots[agent].write_root_pose_to_sim(init_state[env_ids, :7], env_ids)
-            self.robots[agent].write_root_velocity_to_sim(init_state[env_ids, 7:], env_ids)
-            self.robots[agent].write_joint_state_to_sim(
-                self.robots[agent].data.default_joint_pos[env_ids], self.robots[agent].data.default_joint_vel[env_ids], None, env_ids
-            )
-
-            self.goals[agent][env_ids, 2] = float(self.cfg.flight_altitude)
-            self.goals[agent][env_ids] += self.terrain.env_origins[env_ids]
-            self.reset_goal_timer[agent][env_ids] = 0.0
-            self.prev_dist_to_goals[agent][env_ids] = torch.linalg.norm(self.goals[agent][env_ids] - self.robots[agent].data.root_pos_w[env_ids], dim=1)
-
-            self.actions[agent][env_ids] = torch.zeros_like(self.actions[agent][env_ids])
-            self.prev_actions[agent][env_ids] = torch.zeros_like(self.prev_actions[agent][env_ids])
-
-            self.lin_vel_delay[agent].reset(env_ids)
-            self.rel_pos_delay[agent].reset(env_ids)
-
-            if self.lin_vel_obs_max_lag > 0:
-                rand_lags = torch.randint(
-                    low=math.floor(0.77 * self.lin_vel_obs_max_lag),  # Dončić ~~
-                    high=self.lin_vel_obs_max_lag + 1,
-                    size=(len(env_ids),),
-                    dtype=torch.int,
-                    device=self.device,
-                )
-            else:
-                rand_lags = torch.zeros(len(env_ids), dtype=torch.int, device=self.device)
-            self.lin_vel_delay[agent].set_time_lag(rand_lags, batch_ids=env_ids)
-
-            if self.rel_pos_max_lag > 0:
-                rand_lags = torch.randint(
-                    low=math.floor(0.77 * self.rel_pos_max_lag),
-                    high=self.rel_pos_max_lag + 1,
-                    size=(len(env_ids),),
-                    dtype=torch.int,
-                    device=self.device,
-                )
-            else:
-                rand_lags = torch.zeros(len(env_ids), dtype=torch.int, device=self.device)
-            self.rel_pos_delay[agent].set_time_lag(rand_lags, batch_ids=env_ids)
-
-            self.observation_windows[agent].reset(env_ids)
-
-        # Update relative positions
-        for i, agent_i in enumerate(self.possible_agents):
-            for j, agent_j in enumerate(self.possible_agents):
-                if i == j:
-                    continue
-                self.relative_positions_w[i][j][env_ids] = self.robots[agent_j].data.root_pos_w[env_ids] - self.robots[agent_i].data.root_pos_w[env_ids]
-
-    def _get_observations(self) -> dict[str, torch.Tensor]:
-        # Reset goal after _get_rewards before _get_observations and _get_states
-        # Asynchronous goal resetting in all missions except migration
-        # (A mix of synchronous and asynchronous goal resetting may cause state to lose Markovianity :(
-        start = time.perf_counter()
-
-        # Synchronous goal updating along the custom trajectory in the migration mission
-        if self.cfg.use_custom_traj:
-            custom_traj_envs = (self.env_mission_ids == 0).nonzero(as_tuple=False).squeeze(-1)
-            if len(custom_traj_envs) > 0:
-                # Step to the next piece in the trajectory for each env
-                self.custom_traj_exec_timesteps[custom_traj_envs] += self.step_dt
-                traj_indices = self.custom_traj_exec_indexs[custom_traj_envs]
-                traj_durations = self.custom_traj_durations[traj_indices]
-
-                # Check if the trajectory is finished
-                mask_ = self.custom_traj_exec_timesteps[custom_traj_envs] >= traj_durations
-                if mask_.any():
-                    completed_envs = custom_traj_envs[mask_]
-                    self.custom_traj_exec_indexs[completed_envs] = torch.randint(0, self.cfg.num_custom_trajs, (mask_.sum().item(),), device=self.device)
-                    self.custom_traj_exec_timesteps[completed_envs] = 0.0
-                    traj_indices = self.custom_traj_exec_indexs[custom_traj_envs]
-                    traj_durations = self.custom_traj_durations[traj_indices]
-
-                # Get target position from the trajectory
-                traj = self.custom_traj_library[traj_indices]
-                current_goals = traj.get_pos(self.custom_traj_exec_timesteps[custom_traj_envs]) + self.terrain.env_origins[custom_traj_envs]
-                for agent_name in self.possible_agents:
-                    self.goals[agent_name][custom_traj_envs] = current_goals
-
-        for i, agent in enumerate(self.possible_agents):
-            dist_to_goal = torch.linalg.norm(self.goals[agent] - self.robots[agent].data.root_pos_w, dim=1)
-            success_i = dist_to_goal < self.success_dist_thr
-
-            if success_i.any():
-                self.reset_goal_timer[agent][success_i] += self.step_dt
-
-            low, high = self.cfg.goal_reset_time_range
-            rand_wait = torch.rand(self.num_envs, device=self.device) * (high - low) + low
-            reset_goal_idx = (self.reset_goal_timer[agent] > rand_wait).nonzero(as_tuple=False).squeeze(-1)
-
-            if len(reset_goal_idx) > 0:
-                mission_0_ids = reset_goal_idx[self.env_mission_ids[reset_goal_idx] == 0]  # The migration mission
-                mission_1_ids = reset_goal_idx[self.env_mission_ids[reset_goal_idx] == 1]  # The crossover mission
-                mission_2_ids = reset_goal_idx[self.env_mission_ids[reset_goal_idx] == 2]  # The chaotic mission
-
-                if len(mission_0_ids) > 0 and not self.cfg.use_custom_traj:
-                    rg = self.cfg.flight_range - self.success_dist_thr[mission_0_ids][0]
-
-                    unified_goal_xy = self.unified_goal_xy[mission_0_ids]
-                    unified_new_goal_xy = torch.zeros(len(mission_0_ids), 2, device=self.device)
-                    done = torch.zeros(len(mission_0_ids), dtype=torch.bool, device=self.device)
-
-                    for attempt in range(self.cfg.max_sampling_tries):
-                        active = ~done
-                        if not torch.any(active):
-                            break
-
-                        active_ids = active.nonzero(as_tuple=False).squeeze(-1)
-                        unified_new_goal_xy[active_ids] = torch.zeros_like(unified_new_goal_xy[active_ids]).uniform_(-rg, rg)
-                        dist = torch.linalg.norm(unified_goal_xy[active_ids] - unified_new_goal_xy[active_ids])
-
-                        ok = dist > 1.414 * rg
-                        if torch.any(ok):
-                            done[active_ids[ok]] = True
-
-                    if torch.any(~done):
-                        failed_ids = mission_0_ids[~done].tolist()
-                        logger.warning(
-                            f"The search for goal position of the swarm meeting constraints within a side-length {2 * rg} box failed for envs {failed_ids}, using the final sample #_#"
-                        )
-
-                    self.unified_goal_xy[mission_0_ids] = unified_new_goal_xy
-
-                    # Synchronous goal resetting in mission migration
-                    for i_, agent_ in enumerate(self.possible_agents):
-                        self.goals[agent_][mission_0_ids, :2] = self.unified_goal_xy[mission_0_ids].clone()
-                        self.goals[agent_][mission_0_ids, 2] = float(self.cfg.flight_altitude)
-                        self.goals[agent_][mission_0_ids] += self.terrain.env_origins[mission_0_ids]
-
-                        self.reset_goal_timer[agent_][mission_0_ids] = 0.0
-
-                        self.prev_dist_to_goals[agent_][mission_0_ids] = torch.linalg.norm(
-                            self.goals[agent_][mission_0_ids] - self.robots[agent_].data.root_pos_w[mission_0_ids], dim=1
-                        )
-
-                if len(mission_1_ids) > 0:
-                    self.ang[mission_1_ids, i] = (self.ang[mission_1_ids, i] + math.pi) % (2 * math.pi)
-                    self.goals[agent][mission_1_ids, :2] = torch.stack(
-                        [torch.cos(self.ang[mission_1_ids, i]), torch.sin(self.ang[mission_1_ids, i])], dim=1
-                    ) * self.rand_r[mission_1_ids].unsqueeze(-1)
-
-                    self.goals[agent][mission_1_ids, 2] = float(self.cfg.flight_altitude)
-                    self.goals[agent][mission_1_ids] += self.terrain.env_origins[mission_1_ids]
-
-                if len(mission_2_ids) > 0:
-                    rg = self.cfg.flight_range - self.success_dist_thr[mission_2_ids][0] - 0.25
-
-                    rand_goal_p = torch.zeros(len(mission_2_ids), self.cfg.num_drones, 2, device=self.device)
-                    for i_, agent_ in enumerate(self.possible_agents):
-                        rand_goal_p[:, i_] = self.goals[agent_][mission_2_ids, :2].clone()
-                    env_origins = self.terrain.env_origins[mission_2_ids]
-                    done = torch.zeros(len(mission_2_ids), dtype=torch.bool, device=self.device)
-
-                    for attempt in range(self.cfg.max_sampling_tries):
-                        active = ~done
-                        if not torch.any(active):
-                            break
-
-                        active_ids = active.nonzero(as_tuple=False).squeeze(-1)
-                        rand_goal_p[active_ids, i] = (torch.rand(active_ids.numel(), 2, device=self.device) * 2 - 1) * rg + env_origins[active_ids, :2]  # [num_active, 2]
-                        dmat = torch.cdist(rand_goal_p[active_ids], rand_goal_p[active_ids])  # [num_active, num_drones, num_drones]
-                        eye = torch.eye(self.cfg.num_drones, dtype=torch.bool, device=self.device).expand(active_ids.numel(), -1, -1)
-
-                        dmat.masked_fill_(eye, float("inf"))
-                        dmin = dmat.amin(dim=(-2, -1))  # [num_active]
-
-                        ok = dmin > self.cfg.collide_dist
-                        if torch.any(ok):
-                            done[active_ids[ok]] = True
-
-                    if torch.any(~done):
-                        failed_ids = mission_2_ids[~done].tolist()
-                        logger.warning(
-                            f"The search for goal position of a drone meeting constraints within a side-length {2 * rg} box failed for envs {failed_ids}, using the final sample #_#"
-                        )
-
-                    self.goals[agent][mission_2_ids, :2] = rand_goal_p[:, i]
-
-                self.reset_goal_timer[agent][reset_goal_idx] = 0.0
-
-                self.prev_dist_to_goals[agent][reset_goal_idx] = torch.linalg.norm(
-                    self.goals[agent][reset_goal_idx] - self.robots[agent].data.root_pos_w[reset_goal_idx], dim=1
-                )
-        end = time.perf_counter()
-        logger.debug(f"Resetting goals takes {end - start:.5f}s")
-
-        start = time.perf_counter()
-        stacked_observations = {}
-        sin_max = math.sin(math.radians(self.cfg.max_angle_of_view))
-        max_vis = self.cfg.max_visible_distance
-        for i, agent_i in enumerate(self.possible_agents):
-            # Add noise to linear velocity observation
-            lin_vel_w = self.robots[agent_i].data.root_lin_vel_w[:, :2]
-            lin_vel_w_noisy = lin_vel_w + torch.randn_like(lin_vel_w) * self.cfg.lin_vel_noise_std if self.cfg.enable_domain_randomization else lin_vel_w
-
-            ### ============= Generate noisy relative position observation and observability ============= ###
-
-            idx_others = [j for j in range(len(self.possible_agents)) if j != i]
-            rel_pos_w = torch.stack([self.relative_positions_w[i][j] for j in idx_others], dim=1)  # [num_envs, num_drones - 1, 3]
-
-            distances = torch.linalg.norm(rel_pos_w, dim=-1)  # [num_envs, num_drones - 1]
-            safe_dist = distances.clamp_min(1e-6)
-
-            # Discard relative observations exceeding maximum visible distance
-            mask_far = distances > max_vis  # [num_envs, num_drones - 1]
-
-            # Transform relative positions from world to body frame in a vectorized manner
-            inv_quat = quat_inv(self.robots[agent_i].data.root_quat_w)  # [num_envs, 4]
-            B, N = distances.shape
-            rel_pos_w_flat = rel_pos_w.reshape(B * N, 3)
-            rel_pos_b_flat = quat_apply(inv_quat.unsqueeze(1).expand(B, N, 4).reshape(B * N, 4), rel_pos_w_flat)  # [num_envs * (num_drones - 1), 3]
-            rel_pos_b = rel_pos_b_flat.view(B, N, 3)  # [num_envs, num_drones - 1, 3]
-
-            # Discard relative observations exceeding maximum elevation field of view
-            abs_rel_pos_z_b = rel_pos_b[..., 2].abs()
-            mask_invisible = (abs_rel_pos_z_b / safe_dist) > sin_max  # [num_envs, num_drones - 1]
-
-            mask_blocked = mask_far | mask_invisible
-
-            # Domain randomization
-            rel_pos_b_noisy = rel_pos_b.clone()
-            rel_pos_b_noisy = rel_pos_b_noisy.masked_fill(mask_blocked.unsqueeze(-1), 0.0)
-            observability_mask = torch.ones_like(distances, dtype=rel_pos_b_noisy.dtype)
-            observability_mask = observability_mask.masked_fill(mask_blocked, 0.0)
-
-            if self.cfg.enable_domain_randomization:
-                mask_observable = ~mask_blocked
-                if mask_observable.any():
-                    rel_pos = rel_pos_b[mask_observable]  # [num_observable, 3]
-                    dist = distances[mask_observable]  # [num_observable]
-
-                    dist_normalized = (dist / max_vis).clamp(0.0, 1.0)
-
-                    # Apply a gradually increasing noise to the distance as it grows
-                    std_dist = self.cfg.min_dist_noise_std + dist_normalized * (self.cfg.max_dist_noise_std - self.cfg.min_dist_noise_std)
-                    dist_noisy = (dist + torch.randn_like(dist) * std_dist).clamp_min(1e-6)
-
-                    # Similarly apply noise to the bearing in spherical coordinates
-                    x, y, z = rel_pos[:, 0], rel_pos[:, 1], rel_pos[:, 2]
-                    az = torch.atan2(y, x)  # Azimuth angle
-                    el = torch.atan2(z, torch.sqrt(x * x + y * y))  # Elevation angle
-                    std_bearing = self.cfg.min_bearing_noise_std + dist_normalized * (self.cfg.max_bearing_noise_std - self.cfg.min_bearing_noise_std)
-                    az_noisy = az + torch.randn_like(az) * std_bearing
-                    el_noisy = el + torch.randn_like(el) * std_bearing
-
-                    # Spherical to Cartesian coordinates
-                    rel_pos_noisy = torch.stack(
-                        [
-                            dist_noisy * torch.cos(el_noisy) * torch.cos(az_noisy),
-                            dist_noisy * torch.cos(el_noisy) * torch.sin(az_noisy),
-                            dist_noisy * torch.sin(el_noisy),
-                        ],
-                        dim=1,
-                    )
-
-                    # Randomly drop relative observations
-                    keep_mask = torch.rand_like(dist) > self.cfg.drop_prob  # [num_observable]
-
-                    rel_pos_b_noisy[mask_observable] = torch.where(keep_mask.unsqueeze(-1), rel_pos_noisy, torch.zeros_like(rel_pos_noisy))
-                    observability_mask[mask_observable] = keep_mask.to(rel_pos_b_noisy.dtype)
-
-            # Sort neighbors by perceived (noisy) distance and invisible ones go last
-            perceived_dist = torch.linalg.norm(rel_pos_b_noisy, dim=-1)
-            sort_key = torch.where(observability_mask > 0.5, perceived_dist, torch.full_like(perceived_dist, float("inf")))
-            sorted_idx = torch.argsort(sort_key, dim=1)
-            rel_pos_b_noisy = rel_pos_b_noisy.gather(1, sorted_idx.unsqueeze(-1).expand(-1, -1, 3))
-            observability_mask = observability_mask.gather(1, sorted_idx)
-
-            rel_pos_b_noisy_with_observability = torch.cat([rel_pos_b_noisy, observability_mask.unsqueeze(-1)], dim=-1).reshape(B, N * 4)
-
-            delayed_lin_vel_w_noisy = self.lin_vel_delay[agent_i].compute(lin_vel_w_noisy)
-            delayed_rel_pos_b_noisy_with_observability = self.rel_pos_delay[agent_i].compute(rel_pos_b_noisy_with_observability)
-
-            obs = torch.cat(
-                [
-                    self.actions[agent_i].clone(),
-                    self.goals[agent_i] - self.robots[agent_i].data.root_pos_w,
-                    self.robots[agent_i].data.root_quat_w.clone(),
-                    delayed_lin_vel_w_noisy,  # TODO: Try to discard velocity observations to reduce sim2real gap
-                    delayed_rel_pos_b_noisy_with_observability,
-                ],
-                dim=1,
-            )
-
-            self.observation_windows[agent_i].append(obs)
-            stacked_observations[agent_i] = self.observation_windows[agent_i].buffer.flatten(1)
-
-            if self.cfg.debug_vis_rel_pos:
-                # Convert noisy relative positions back to world frame for visualization
-                quat = self.robots[agent_i].data.root_quat_w
-                rel_pos_b_noisy_flat = rel_pos_b_noisy.reshape(B * N, 3)
-                rel_pos_w_noisy_flat = quat_apply(quat.unsqueeze(1).expand(B, N, 4).reshape(B * N, 4), rel_pos_b_noisy_flat)
-                rel_pos_w_noisy = rel_pos_w_noisy_flat.view(B, N, 3)
-
-                self.rel_pos_w_noisy_with_observability[agent_i] = torch.cat([rel_pos_w_noisy, observability_mask.unsqueeze(-1)], dim=-1).reshape(B, N * 4)
-
-        end = time.perf_counter()
-        logger.debug(f"Generating observations takes {end - start:.5f}s")
-
-        return stacked_observations
-
-    def _get_states(self):
-        curr_state = []
-        for agent in self.possible_agents:
-            curr_state.extend(
-                [
-                    self.actions[agent].clone(),
-                    self.robots[agent].data.root_pos_w - self.terrain.env_origins,
-                    self.goals[agent] - self.robots[agent].data.root_pos_w,
-                    self.robots[agent].data.root_quat_w.clone(),
-                    self.robots[agent].data.root_vel_w.clone(),
-                ]
-            )
-        curr_state = torch.cat(curr_state, dim=1)
-        return curr_state
+
+        # Assign reset environments to the active map
+        self._env_map_assignments[env_ids] = self._active_map_id
+
+
+        self._desired_speed_init[env_ids] = torch.zeros_like(self._desired_speed_init[env_ids]).uniform_(*self.cfg.des_vel_range)
+        self._desired_speed[env_ids] = self._desired_speed_init[env_ids]
+
+        self._point_provider.resample(env_ids)
+        self._desired_pos_w[env_ids] = self._point_provider.get_target_points()[env_ids]
+
+
+        # TODO: 评估是否需要抽象为初始位置采样对象
+        joint_pos = self._robot.data.default_joint_pos[env_ids].clone()
+        joint_vel = self._robot.data.default_joint_vel[env_ids].clone()
+        default_root_state = self._robot.data.default_root_state[env_ids].clone()
+
+        default_root_state[:, :3] = self._point_provider.get_spawn_points()[env_ids]
+
+        # Apply random yaw rotation to the initial root state
+        initial_random_yaw = torch.zeros_like(default_root_state[:, 0]).uniform_(-math.pi, math.pi)
+        default_root_state[:, 3] = torch.cos(initial_random_yaw * 0.5)  # w
+        default_root_state[:, 6] = torch.sin(initial_random_yaw * 0.5)  # z
+        default_root_state[:, 4] = 0.0  # x
+        default_root_state[:, 5] = 0.0  # y
+
+        self._robot.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
+        self._robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
+        self._robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
+
+
+
+        # 重置 “上一时刻” 数据
+        self._last_pos_w[env_ids] = default_root_state[:, :3]
+        self._last_actions[env_ids] = torch.zeros(4, device=self.device)
+
+        # 重置 done 相关标志
+        self._numerical_instability[env_ids] = False
+        self._is_contact[env_ids] = False
+        self._is_success[env_ids] = False
+
+
+        # TODO: 待测试并加入高度平滑
+        # # Reset height randomizer with initial positions now that they are set
+        # if self._height_randomizer is not None:
+        #     initial_positions = default_root_state[:, :3]  # [x, y, z] coordinates
+        #     self._height_randomizer.reset(env_ids, initial_positions)
+
+
+        # TODO: 考虑抽象为回合评估统计对象
+        # Reset episode outcome tracking for the reset environments
+        self._episode_outcomes[env_ids] = 0
+
+
+
+    
+    def _get_observations(self) -> dict:
+        """
+        Return the observations for the agent in a dictionary.
+        """
+
+        obs_cfg = self.cfg.observations
+        robot_data = self._robot.data
+
+        # TODO: 待测试并加入高度平滑
+        # # Update height randomization
+        # if self._height_randomizer is not None:
+        #     self._height_randomizer.step(robot_data.root_state_w[:, :3])
+        #     # Apply height randomization to current goal positions
+        #     self._desired_pos_w = self._height_randomizer.apply_to_goals(self._desired_pos_w)
+
+        # ----------------------------------------
+        # 原始数据读取
+        # ----------------------------------------
+        # 多相机深度图像
+        max_d = self.cfg.depth_cameras.max_distance
+        depth_image_list = self._depth_cameras.read_batch()
+        # print(depth_image.shape)
+
+        # 深度图像 (TODO: 待加入噪声)
+        # # (N, C, H, W) Normalize to [0, 1] and scale
+        # image_noised = image_raw = torch.stack(depth_image_list, dim=1) / max_d * obs_cfg.depth_image_scale
+        image_noised = image_raw = torch.cat(depth_image_list, dim=2).unsqueeze(1) / max_d * obs_cfg.depth_image_scale
+        # print(image_raw.shape)
+
+        # TODO: 待加入多相机类中
+        # # Debug: visualize depth images
+        # depth_image_cat = torch.cat(depth_image_list, dim=2)
+        # depth_image_cat = depth_image_cat[0].squeeze(-1)
+        # H, W = depth_image_cat.shape
+        # depth_image_cat_u8 = torch.clamp((depth_image_cat / max_d * 255.0), 0, 255).to(torch.uint8)
+        # scale = 6
+        # new_w = max(1, int(W * scale))
+        # new_h = max(1, int(H * scale))
+        # img_big = cv2.resize(depth_image_cat_u8.cpu().numpy(), (new_w, new_h), interpolation=cv2.INTER_NEAREST)
+        # win = "Raycast Camera Robot 0 Depth"
+        # if not hasattr(self, "_cv_win_inited"):
+        #     self._cv_win_inited = set()
+        # if win not in self._cv_win_inited:
+        #     cv2.namedWindow(win, cv2.WINDOW_NORMAL)
+        #     cv2.resizeWindow(win, new_w, new_h)  # 给个初始大窗口
+        #     self._cv_win_inited.add(win)
+        # cv2.imshow(win, img_big)
+        # cv2.waitKey(1)
+
+        
+        # TODO: 可参考人家噪声是怎么加的
+        # # Get depth image from ReloadableRayCasterCamera
+        # depth_image = self._raycast_camera.data.output["distance_to_image_plane"].clone()
+        # depth_image = depth_image_orig = depth_image.reshape(self.num_envs, -1)
+
+        # # Apply sensor noise simulation (matching original environment)
+        # invalid_rate = random.random() * self.cfg.depth_invalid_rate_max
+        # invalid_masks = torch.rand_like(depth_image) < invalid_rate
+        # depth_image = torch.where(invalid_masks,
+        #                       torch.tensor(self.cfg.camera_max_distance, device=self.device, dtype=depth_image.dtype),
+        #                       depth_image)
+
+        # 当前机器人状态量
+        pos_w     = robot_data.root_state_w[:, :3]
+        quat_w    = robot_data.root_quat_w
+        lin_vel_b = robot_data.root_lin_vel_b
+        ang_vel_b = robot_data.root_ang_vel_b
+
+        # ----------------------------------------
+        # 计算每项观测量
+        # ----------------------------------------
+        # TODO: 下面obs计算归一化计算可抽象成函数；对于 fp16/bf16 可以提升到 fp32 统一处理
+
+        # 计算旋转矩阵
+        rot_matrix_b2w = matrix_from_quat(quat_w)   # Shape: (num_envs, 3, 3)
+        rot_matrix = rot_matrix_b2w.flatten(1)      # Shape: (num_envs, 9)
+
+        # 计算目标点特征 (TODO: 待评估这种 goal_feat 定义是否合适)
+        pos_to_goal = self._desired_pos_w - pos_w
+        # TODO: 评估是否需要对 dir_xy 加入距离过小时的门控衰减
+        err_xy = pos_to_goal[:, :2]
+        eps = 1e-6
+        if err_xy.dtype in (torch.float16, torch.bfloat16):
+            eps = 1e-3
+        dir_xy = err_xy / torch.linalg.vector_norm(err_xy, dim=1, keepdim=True).clamp_min(eps)
+        # TODO: 评估 err_Z 是否需要做尺度处理
+        err_z  = pos_to_goal[:, 2]
+        goal_feat = torch.cat([dir_xy, err_z.unsqueeze(-1)], dim=1)  # [dir_x, dir_y, err_Z]
+
+        # 计算相对于目标点的位移（限制最大距离，保持方向不变）
+        eps = 1e-6
+        if pos_to_goal.dtype in (torch.float16, torch.bfloat16):
+            eps = 1e-3
+        distance_to_goal = torch.linalg.vector_norm(pos_to_goal, dim=1, keepdim=True)
+        dir_to_goal = pos_to_goal / distance_to_goal.clamp_min(eps)
+        pos_to_goal_norm = dir_to_goal * torch.clamp(distance_to_goal / obs_cfg.max_goal_distance, max=1.0)
+        
+        # # 计算相对于最近障碍物的位移（来自全局点云的 KD-tree；限制最大距离，保持方向不变）
+        # _, indices = self.occ_kdtree.query(pos_w.cpu().numpy(), workers=-1)
+        # self._closest_points = torch.tensor(self.occ_kdtree.data[indices], device=self.device, dtype=pos_w.dtype)
+        # pos_to_obstacle = self._closest_points - pos_w
+        # eps = 1e-6
+        # if pos_to_obstacle.dtype in (torch.float16, torch.bfloat16):
+        #     eps = 1e-3
+        # distance_to_obstacle = torch.linalg.vector_norm(pos_to_obstacle, dim=1, keepdim=True)
+        # dir_to_obstacle = pos_to_obstacle / distance_to_obstacle.clamp_min(eps)
+        # pos_to_obstacle_norm = dir_to_obstacle * torch.clamp(distance_to_obstacle / obs_cfg.max_obstacle_distance, max=1.0)
+
+        # ----------------------------------------
+        # 构造观测向量
+        # ----------------------------------------
+        # 构造 policy 网络观测
+        policy_obs = torch.cat(
+            [
+                ang_vel_b             * obs_cfg.ang_vel_scale,         # 角速度（body系）[wx, wy, wz]
+                rot_matrix            * obs_cfg.rot_mat_scale,         # 9D 旋转矩阵 (TODO: 改为前六维/其他旋转表示?)
+                (self._desired_speed) * obs_cfg.desired_speed_scale,   # 期望速度
+                goal_feat             * obs_cfg.goal_feat_scale,       # 目标点特征 [dir_x, dir_y, z_err] (TODO: z_err scale 能否与 dir_xy 相同?)
+                self._last_actions    * obs_cfg.last_action_scale,     # 上一步 action [thrust, bodyrate(x, y, z)]
+            ],
+            dim=-1,
+        )
+        # 构造 critic 网络观测
+        critic_obs = torch.cat(
+            [
+                # 常规观测
+                ang_vel_b             * obs_cfg.ang_vel_scale,         # 角速度（body系）[wx, wy, wz]
+                rot_matrix            * obs_cfg.rot_mat_scale,         # 9D 旋转矩阵 (TODO: 改为前六维/其他旋转表示?)
+                (self._desired_speed) * obs_cfg.desired_speed_scale,   # 期望速度
+                goal_feat             * obs_cfg.goal_feat_scale,       # 目标点特征 [dir_x, dir_y, z_err] (TODO: z_err scale 能否与 dir_xy 相同?)
+                self._last_actions    * obs_cfg.last_action_scale,     # 上一步 action [thrust, bodyrate(x, y, z)]
+
+                # 特权观测
+                lin_vel_b             * obs_cfg.lin_vel_scale,         # 线速度（body系）[vx, vy, vz]
+                pos_to_goal_norm      * obs_cfg.pos_to_goal_scale,     # 相对于目标点的位移（最大距离剪裁，方向不变）
+                # pos_to_obstacle_norm  * obs_cfg.pos_to_obstacle_scale, # 相对于最近障碍物的位移（最大距离剪裁，方向不变）
+
+                # TODO: 待测试并加入风扰动
+                # torch.mean(self.wind_acc_log, dim=0) * 30, # wind disturbance
+            ],
+            dim=-1,
+        )
+        # 观测值检查
+        policy_obs = self.CHECK_NAN(policy_obs)
+        critic_obs = self.CHECK_NAN(critic_obs)
+        self.CHECK_state()
+
+        return {
+            "policy": {"image": image_noised, "state": policy_obs},
+            "critic": {"image": image_raw,    "state": critic_obs},
+        }
+
+
+
 
     def _set_debug_vis_impl(self, debug_vis: bool):
+        """Show debug markers if debug_vis is True."""
+        # create markers if necessary for the first tome
         if debug_vis:
-            if self.cfg.debug_vis_goal:
-                if not hasattr(self, "goal_visualizers"):
-                    self.goal_visualizers = {}
-                    for i, agent in enumerate(self.possible_agents):
-                        marker_cfg = CUBOID_MARKER_CFG.copy()
-                        marker_cfg.markers["cuboid"].size = (0.07, 0.07, 0.07)
-                        marker_cfg.markers["cuboid"].visual_material = sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 1.0, 0.0))
-                        marker_cfg.prim_path = f"/Visuals/Command/goal_{i}"
-                        self.goal_visualizers[agent] = VisualizationMarkers(marker_cfg)
-                        self.goal_visualizers[agent].set_visibility(True)
+            if not hasattr(self, "goal_pos_visualizer"):
+                marker_cfg = CUBOID_MARKER_CFG.copy()
+                marker_cfg.markers["cuboid"].size = (0.05, 0.05, 0.05)
+                # -- goal pose
+                marker_cfg.prim_path = "/Visuals/Command/goal_position"
+                self.goal_pos_visualizer = VisualizationMarkers(marker_cfg)
+                print("Created goal_pos_visualizer")
+            # set their visibility to true
+            self.goal_pos_visualizer.set_visibility(True)
 
-            if self.cfg.debug_vis_collide_dist:
-                if not hasattr(self, "collide_dist_visualizers"):
-                    self.collide_dist_visualizers = {}
-                    for i, agent in enumerate(self.possible_agents):
-                        marker_cfg = VisualizationMarkersCfg(
-                            prim_path=f"/Visuals/collide_dist_{i}",
-                            markers={
-                                "cylinder": sim_utils.CylinderCfg(
-                                    radius=self.cfg.collide_dist / 2,
-                                    height=0.005,
-                                    visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.01, 0.01), roughness=0.0),
-                                )
-                            },
-                        )
-                        self.collide_dist_visualizers[agent] = VisualizationMarkers(marker_cfg)
-                        self.collide_dist_visualizers[agent].set_visibility(True)
+            if not hasattr(self, "goal_yaw_visualizer"):
+                goal_arrow_cfg = GREEN_ARROW_X_MARKER_CFG.copy()
+                goal_arrow_cfg.markers["arrow"].usd_path = get_ui_arrow_usd_path()
+                goal_arrow_cfg.markers["arrow"].scale = (0.05, 0.05, 0.2)
+                # -- goal yaw
+                goal_arrow_cfg.prim_path = "/Visuals/Command/goal_yaw"
+                self.goal_yaw_visualizer = VisualizationMarkers(goal_arrow_cfg)
+                print("Created goal_yaw_visualizer")
+            # set their visibility to true
+            self.goal_yaw_visualizer.set_visibility(True)
 
-            if self.cfg.debug_vis_rel_pos:
-                if not hasattr(self, "rel_pos_visualizers"):
-                    self.num_vis_point = 13
-                    self.vis_reset_interval = 3.0
-                    self.last_reset_time = 0.0
+            if not hasattr(self, "current_yaw_visualizer"):
+                current_arrow_cfg = FRAME_MARKER_CFG.copy()
+                current_arrow_cfg.markers["frame"].usd_path = get_ui_frame_usd_path()
+                current_arrow_cfg.markers["frame"].scale = (0.1, 0.1, 0.1)
 
-                    self.selected_vis_agent = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
-                    num_neighbors = len(self.possible_agents) - 1
+                print("[debug] current_arrow_cfg.markers keys:", list(current_arrow_cfg.markers.keys()))
+                if "connecting_line" in current_arrow_cfg.markers:
+                    del current_arrow_cfg.markers["connecting_line"]  # Remove connecting line for clarity
 
-                    self.rel_pos_visualizers = {}
-                    for j in range(num_neighbors):
-                        self.rel_pos_visualizers[j] = []
-                        for p in range(self.num_vis_point):
-                            marker_cfg = VisualizationMarkersCfg(
-                                prim_path=f"/Visuals/rel_loc_{j}_{p}",
-                                markers={"sphere": sim_utils.SphereCfg(radius=0.05, visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.01, 0.01, 1.0)))},
-                            )
-                            self.rel_pos_visualizers[j].append(VisualizationMarkers(marker_cfg))
-                            self.rel_pos_visualizers[j][p].set_visibility(True)
+                # -- current yaw
+                current_arrow_cfg.prim_path = "/Visuals/Command/current_yaw"
+                self.current_yaw_visualizer = VisualizationMarkers(current_arrow_cfg)
+                print("Created current_yaw_visualizer")
+            # set their visibility to true
+            self.current_yaw_visualizer.set_visibility(True)
+
+            if not hasattr(self, "closest_points_visualizer"):
+                marker_cfg = VisualizationMarkersCfg(
+                    prim_path="/Visuals/State/closest_points",
+                    markers={
+                        "closest_point": sim_utils.SphereCfg(
+                            radius=0.05,
+                            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 1.0, 1.0)),
+                        ),
+                    },
+                )
+                # -- closest points
+                self.closest_points_visualizer = VisualizationMarkers(marker_cfg)
+                print("Created closest_points_visualizer")
+            # set their visibility to true
+            self.closest_points_visualizer.set_visibility(True)
+        else:
+            if hasattr(self, "goal_pos_visualizer"):
+                self.goal_pos_visualizer.set_visibility(False)
+            if hasattr(self, "goal_yaw_visualizer"):
+                self.goal_yaw_visualizer.set_visibility(False)
+            if hasattr(self, "current_yaw_visualizer"):
+                self.current_yaw_visualizer.set_visibility(False)
+            if hasattr(self, "closest_points_visualizer"):
+                self.closest_points_visualizer.set_visibility(False)
+
+
+
 
     def _debug_vis_callback(self, event):
-        if hasattr(self, "goal_visualizers"):
-            for agent in self.possible_agents:
-                self.goal_visualizers[agent].visualize(translations=self.goals[agent])
-
-        if hasattr(self, "collide_dist_visualizers"):
-            for agent in self.possible_agents:
-                t = self.robots[agent].data.root_pos_w.clone()
-                t[:, 2] -= 0.077
-                self.collide_dist_visualizers[agent].visualize(translations=t)
-
-        if hasattr(self, "rel_pos_visualizers"):
-            t = self.common_step_counter * self.step_dt
-
-            if t - self.last_reset_time > self.vis_reset_interval:
-                self.last_reset_time = t
-                self.selected_vis_agent = torch.randint(0, len(self.possible_agents), (self.num_envs,), device=self.device)
-
-            rel_obs_list = []
-            for agent in self.possible_agents:
-                # Plot the latest frame of relative positions
-                rel_obs = self.rel_pos_w_noisy_with_observability[agent]
-
-                # Plot older relative observations in the history buffer
-                # self_obs_dim = int(self.cfg.self_observation_dim)
-                # rel_obs = self.observation_buffer[agent][-2, :, self_obs_dim:]
-
-                rel_obs = rel_obs.view(self.num_envs, -1, 4)  # [num_envs, num_drones - 1, 4]
-                rel_obs_list.append(rel_obs)
-            # Stack → [num_envs, num_drones, num_drones - 1, 4]
-            stack_rel_obs = torch.stack(rel_obs_list, dim=1)
-
-            sel_idx = self.selected_vis_agent
-            # Select → [num_envs, num_drones - 1, 4]
-            sel_rel_obs = stack_rel_obs.gather(dim=1, index=sel_idx.view(self.num_envs, 1, 1, 1).expand(self.num_envs, 1, stack_rel_obs.size(2), 4)).squeeze(1)
-
-            orig_list = [self.robots[a].data.root_pos_w for a in self.possible_agents]
-            stack_orig = torch.stack(orig_list, dim=1)
-            orig = stack_orig.gather(dim=1, index=sel_idx.view(self.num_envs, 1, 1).expand(self.num_envs, 1, 3)).squeeze(1)
-
-            for j in range(sel_rel_obs.size(1)):
-                rel_pos = sel_rel_obs[:, j, :3]
-                for p in range(self.num_vis_point):
-                    frac = float(p + 1) / (self.num_vis_point + 1)
-                    self.rel_pos_visualizers[j][p].visualize(translations=orig + rel_pos * frac)
-
-    def _publish_debug_signals(self):
-
-        t = self._get_ros_timestamp()
-        agent = "drone_0"
-        env_id = 0
-
-        # Publish states
-        state = self.robots[agent].data.root_state_w[env_id]
-        p = state[:3].cpu().numpy()
-        q = state[3:7].cpu().numpy()
-        v = state[7:10].cpu().numpy()
-        w = state[10:13].cpu().numpy()
-
-        odom_msg = Odometry()
-        odom_msg.header.stamp = t
-        odom_msg.header.frame_id = "world"
-        odom_msg.child_frame_id = "base_link"
-        odom_msg.pose.pose.position.x = float(p[0])
-        odom_msg.pose.pose.position.y = float(p[1])
-        odom_msg.pose.pose.position.z = float(p[2])
-        odom_msg.pose.pose.orientation.w = float(q[0])
-        odom_msg.pose.pose.orientation.x = float(q[1])
-        odom_msg.pose.pose.orientation.y = float(q[2])
-        odom_msg.pose.pose.orientation.z = float(q[3])
-        odom_msg.twist.twist.linear.x = float(v[0])
-        odom_msg.twist.twist.linear.y = float(v[1])
-        odom_msg.twist.twist.linear.z = float(v[2])
-        odom_msg.twist.twist.angular.x = float(w[0])
-        odom_msg.twist.twist.angular.y = float(w[1])
-        odom_msg.twist.twist.angular.z = float(w[2])
-        self.odom_pub.publish(odom_msg)
-
-        # Publish actions
-        thrust_desired = self.thrusts_desired[agent][env_id, 0, 2].cpu().numpy()
-        w_desired = self.w_desired[agent][env_id].cpu().numpy()
-        m_desired = self.m_desired[agent][env_id, 0, :].cpu().numpy()
-
-        action_msg = TwistStamped()
-        action_msg.header.stamp = t
-        action_msg.header.frame_id = "world"
-        action_msg.twist.linear.x = float(thrust_desired)
-        action_msg.twist.angular.x = float(w_desired[0])
-        action_msg.twist.angular.y = float(w_desired[1])
-        action_msg.twist.angular.z = float(w_desired[2])
-        self.action_pub.publish(action_msg)
-
-        m_desired_msg = Vector3Stamped()
-        m_desired_msg.header.stamp = t
-        m_desired_msg.vector.x = float(m_desired[0])
-        m_desired_msg.vector.y = float(m_desired[1])
-        m_desired_msg.vector.z = float(m_desired[2])
-        self.m_desired_pub.publish(m_desired_msg)
-
-    def _get_ros_timestamp(self) -> Time:
-        sim_time = self._sim_step_counter * self.physics_dt
-
-        stamp = Time()
-        stamp.sec = int(sim_time)
-        stamp.nanosec = int((sim_time - stamp.sec) * 1e9)
-
-        return stamp
+        """Update debug markers with new goal positions."""
+        self.goal_pos_visualizer.visualize(self._desired_pos_w)
+        self.goal_yaw_visualizer.visualize(self._desired_pos_w, self._desired_yaw_quat)
+        self.current_yaw_visualizer.visualize(self._robot.data.root_pos_w, self._robot.data.root_quat_w)
+        self.closest_points_visualizer.visualize(self._closest_points)
 
 
-from config import agents
 
 
-gym.register(
-    id="FAST-Swarm-Bodyrate",
-    entry_point=SwarmBodyrateEnv,
-    disable_env_checker=True,
-    kwargs={
-        "env_cfg_entry_point": SwarmBodyrateEnvCfg,
-        "sb3_cfg_entry_point": f"{agents.__name__}:swarm_sb3_ppo_cfg.yaml",
-        "skrl_ppo_cfg_entry_point": f"{agents.__name__}:swarm_skrl_ppo_cfg.yaml",
-        "skrl_ippo_cfg_entry_point": f"{agents.__name__}:swarm_skrl_ippo_cfg.yaml",
-        "skrl_mappo_cfg_entry_point": f"{agents.__name__}:swarm_skrl_mappo_cfg.yaml",
-        "rsl_rl_cfg_entry_point": f"{agents.__name__}.swarm_rsl_rl_ppo_cfg:SwarmBodyratePPORunnerCfg",
-    },
-)
+    def CHECK_NAN(self, tensor):
+            # 1. 计算 NaN 掩码 (GPU 操作)
+            nan_mask = torch.isnan(tensor)
+
+            # 2. 计算每行的 NaN 情况 (GPU 操作)
+            row_nan_mask = nan_mask.any(dim=1)
+            
+            # 3. 直接更新 instability 状态 (全 GPU 操作，无 CPU 同步)
+            # 假设 self._numerical_instability 也在 GPU 上
+            self._numerical_instability.logical_or_(row_nan_mask)
+            
+            # 4. 原地修复数值 (GPU 操作)
+            tensor.nan_to_num_(nan=0.0)
+            
+            # 注意：这里去掉了 print，因为 print 必须打断 GPU 流水线。
+            # 如果确实需要监控，建议使用 TensorBoard 或 wandb 记录 row_nan_mask.sum()
+            
+            return tensor
+
+
+
+
+    def CHECK_state(self):
+        # Limit
+        max_angular_velocity = self.cfg.max_angular_velocity_check # rad/s
+
+        # State
+        ang_vel_b = self._robot.data.root_ang_vel_b
+        # rot_w = torch.stack(euler_xyz_from_quat(self._robot.data.root_quat_w), dim=1) # (num_envs, 3) roll, pitch, yaw
+        # rot_w = torch.stack([normallize_angle(rot_w[:, 0]), normallize_angle(rot_w[:, 1]), normallize_angle(rot_w[:, 2])], dim=1)
+        # print(f"Roll: {rot_w[0, 0]}, Pitch: {rot_w[0, 1]}, Yaw: {rot_w[0, 2]}")
+        # Check if the state is unstable
+        state_is_unstable = torch.any(torch.abs(ang_vel_b) > max_angular_velocity, dim=1)
+
+        self._numerical_instability = torch.logical_or(self._numerical_instability, state_is_unstable)
+
+
+
+
+    class EpisodeOutcome(IntEnum):
+        ONGOING = 0
+        SUCCESS = 1
+        DIED = 2
+        TIMEOUT = 3
+
+
+
+
+    # TODO: 考虑抽象为回合评估统计对象
+    def _update_episode_outcomes_and_metrics(self, env_ids, success_mask, died_mask, timed_out_mask):
+        """Update episode outcomes and calculate metrics for completed episodes."""
+
+        # Find completed episodes
+        completed_mask = success_mask | died_mask | timed_out_mask
+        if not torch.any(completed_mask) or len(env_ids) == 0: # double check
+            return 0, 0
+
+        # Update episode outcomes for reset environments
+        self._episode_outcomes[env_ids] = torch.where(
+            success_mask,
+            torch.tensor(self.EpisodeOutcome.SUCCESS, device=self.device),
+            torch.where(
+                died_mask,
+                torch.tensor(self.EpisodeOutcome.DIED, device=self.device),
+                torch.tensor(self.EpisodeOutcome.TIMEOUT, device=self.device)
+            )
+        )
+        self._episode_outcome_history.extend(self._episode_outcomes[env_ids])
+
+        # Record final distances to goal
+        final_distances = torch.linalg.norm(
+            self._desired_pos_w[env_ids] - self._robot.data.root_pos_w[env_ids],
+            dim=1
+        ).cpu().tolist()
+        self._final_distances.extend(final_distances)
+
+        # Count termination reasons using optimized single-pass approach
+        died_env_ids = env_ids[died_mask]
+        if len(died_env_ids) > 0:
+            # Get termination conditions (convert to CPU once)
+            is_unstable = self._numerical_instability[died_env_ids].cpu().numpy()
+            is_collision = self._is_contact[died_env_ids].cpu().numpy()
+            pos_z = self._robot.data.root_pos_w[died_env_ids, 2].cpu().numpy()
+
+            # Record termination reasons for all failed episodes (vectorized)
+            termination_reasons = [
+                {
+                    "numerical_instability": bool(is_unstable[i]),
+                    "collision": bool(is_collision[i]),
+                    "too_low": bool(pos_z[i] < 0.2),
+                    "too_high": bool(pos_z[i] > 2.8)
+                }
+                for i in range(len(died_env_ids))
+            ]
+            self._termination_reason_history.extend(termination_reasons)
+
+        # Update cumulative episode counters
+        total_completed = len(env_ids)
+        total_succeeded = torch.sum(success_mask).item()
+        self._episodes_completed += total_completed
+        self._episodes_succeeded += total_succeeded
+
+        # Log metrics
+        self._log_metrics(len(self._episode_outcome_history))
+
+        return total_completed, total_succeeded
+
+
+
+
+    def _log_metrics(self, total_episodes):
+        """Calculate statistics from episode history and update logs."""
+        if total_episodes == 0:
+            return
+
+        termination_counts = {"numerical_instability": 0, "collision": 0, "too_low": 0, "too_high": 0}
+        if len(self._termination_reason_history) > 0:
+            # Single pass through history with vectorized operations where possible
+            for reason_dict in self._termination_reason_history:
+                # Unroll the inner loop for better performance
+                if reason_dict.get("numerical_instability", False):
+                    termination_counts["numerical_instability"] += 1
+                if reason_dict.get("collision", False):
+                    termination_counts["collision"] += 1
+                if reason_dict.get("too_low", False):
+                    termination_counts["too_low"] += 1
+                if reason_dict.get("too_high", False):
+                    termination_counts["too_high"] += 1
+
+        # Calculate episode outcome statistics using vectorized approach
+        outcome_array = np.array([item.item() for item in self._episode_outcome_history])
+        success_count = int(np.sum(outcome_array == self.EpisodeOutcome.SUCCESS))
+        died_count = int(np.sum(outcome_array == self.EpisodeOutcome.DIED))
+        timeout_count = int(np.sum(outcome_array == self.EpisodeOutcome.TIMEOUT))
+
+        self._success_rate = success_count / total_episodes
+        died_rate = died_count / total_episodes
+        avg_final_distance = sum(self._final_distances) / len(self._final_distances) if self._final_distances else 0.0
+
+        # Calculate goal queue statistics
+        avg_goals_remaining = self._num_goals_remaining.float().mean().item()
+        avg_goal_progress = (self.cfg.num_goals - avg_goals_remaining) / self.cfg.num_goals * 100.0
+
+        self.extras["log"].update({
+            # Episode termination statistics (as percentages)
+            "Metrics / success_rate": self._success_rate * 100.0,
+            "Metrics / died_rate": died_rate * 100.0,
+            "Metrics / time_out_rate": timeout_count / total_episodes * 100.0,
+
+            # died reason statistics (as percentages of total episodes)
+            "Metrics / Died / numerical_instability": termination_counts["numerical_instability"] * died_rate / total_episodes * 100.0,
+            "Metrics / Died / collision": termination_counts["collision"] * died_rate / total_episodes * 100.0,
+            "Metrics / Died / too_low": termination_counts["too_low"] * died_rate / total_episodes * 100.0,
+            "Metrics / Died / too_high": termination_counts["too_high"] * died_rate / total_episodes * 100.0,
+
+            # Performance tracking
+            "Metrics / final_distance_to_goal": avg_final_distance,
+            # Goal queue tracking
+            "Metrics / avg_goals_remaining": avg_goals_remaining,
+            "Metrics / avg_goal_progress_percent": avg_goal_progress,
+
+            # Environment configuration
+            "Metrics / obstacle_min_distance": self.cfg.obstacle_min_distance_init,
+            # "Metrics / hover_hold_requirement_s": float(self._hover_hold_requirement_s),
+        })
