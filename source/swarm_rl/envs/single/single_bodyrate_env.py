@@ -205,67 +205,6 @@ class QuadcopterEnv(DirectRLEnv):
         self._final_distances = collections.deque(maxlen=self._success_rate_window)
 
 
-        # # TODO: 可以抽象为目标管理对象
-        # self._hover_hold_counter_s = torch.zeros(self.num_envs, device=self.device)
-        # self._hover_hold_requirement_s = self.cfg.hover_hold_initial_s
-
-
-
-
-    # # TODO: 可以抽象为目标管理对象
-    # def _update_current_goal(self, env_ids: torch.Tensor = None):
-    #     """Update current goal position from the goal queue for specified environments."""
-    #     if env_ids is None:
-    #         env_ids = torch.arange(self.num_envs, device=self.device)
-
-    #     # Update current goal position from the queue
-    #     valid_mask = self._current_goal_index[env_ids] < self.cfg.num_goals
-    #     valid_env_ids = env_ids[valid_mask]
-
-    #     if len(valid_env_ids) > 0:
-    #         goal_indices = self._current_goal_index[valid_env_ids]
-    #         self._desired_pos_w[valid_env_ids] = self._goal_queue[valid_env_ids, goal_indices]
-
-
-
-
-    def CHECK_NAN(self, tensor):
-        # 1. 计算 NaN 掩码 (GPU 操作)
-        nan_mask = torch.isnan(tensor)
-
-        # 2. 计算每行的 NaN 情况 (GPU 操作)
-        row_nan_mask = nan_mask.any(dim=1)
-        
-        # 3. 直接更新 instability 状态 (全 GPU 操作，无 CPU 同步)
-        # 假设 self._numerical_instability 也在 GPU 上
-        self._numerical_instability.logical_or_(row_nan_mask)
-        
-        # 4. 原地修复数值 (GPU 操作)
-        tensor.nan_to_num_(nan=0.0)
-        
-        # 注意：这里去掉了 print，因为 print 必须打断 GPU 流水线。
-        # 如果确实需要监控，建议使用 TensorBoard 或 wandb 记录 row_nan_mask.sum()
-        
-        return tensor
-
-
-
-
-    def CHECK_state(self):
-        # Limit
-        max_angular_velocity = self.cfg.max_angular_velocity_check # rad/s
-
-        # State
-        ang_vel_b = self._robot.data.root_ang_vel_b
-        # rot_w = torch.stack(euler_xyz_from_quat(self._robot.data.root_quat_w), dim=1) # (num_envs, 3) roll, pitch, yaw
-        # rot_w = torch.stack([normallize_angle(rot_w[:, 0]), normallize_angle(rot_w[:, 1]), normallize_angle(rot_w[:, 2])], dim=1)
-        # print(f"Roll: {rot_w[0, 0]}, Pitch: {rot_w[0, 1]}, Yaw: {rot_w[0, 2]}")
-        # Check if the state is unstable
-        state_is_unstable = torch.any(torch.abs(ang_vel_b) > max_angular_velocity, dim=1)
-
-        self._numerical_instability = torch.logical_or(self._numerical_instability, state_is_unstable)
-
-
 
 
     def _setup_scene(self):
@@ -385,6 +324,8 @@ class QuadcopterEnv(DirectRLEnv):
 
             # 深度相机重新加载地图网格
             self._depth_cameras.reload_cameras()
+
+
             # # Request mesh reload for all ray-casting cameras after terrain regeneration
             # cameras_to_reload = []
             # # Request mesh reload for all cameras
@@ -516,6 +457,383 @@ class QuadcopterEnv(DirectRLEnv):
 
 
 
+    def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """Define terminations and timeouts."""
+
+        # -------------------------
+        # 计算各类结束条件
+        # -------------------------
+        # 计算回合超时的 env
+        time_out = self.episode_length_buf >= self.max_episode_length - 1
+
+        # 计算发生碰撞的 env
+        net_forces = self._contact_sensor.data.net_forces_w_history  # (N, T, B, 3)
+        selected = net_forces[:, :, self._undesired_contact_ids, :]  # (N, T, K, 3)
+        max_contact, _ = torch.norm(selected, dim=-1).max(dim=1)     # (N, K)
+        self._is_contact = (max_contact > self.cfg.contact_force_threshold).any(dim=1)  # Threshold is important for REAL contact detection
+
+        # -------------------------
+        # 计算总结束条件
+        # -------------------------
+        terminated_numerical = self._numerical_instability
+        # TODO: TEMPORARY DISABLE COLLISION TERMINATION
+        terminated_collision = self._is_contact
+        # terminated_collision = torch.zeros_like(self._is_contact)
+        terminated_success   = self._is_success
+
+        terminated = terminated_numerical | terminated_collision | terminated_success
+
+        # -------------------------
+        # 记录回合结束原因到日志（本 step 内“将要结束”的 env 统计）
+        # -------------------------
+        # 构造互斥的结束原因（按优先级：success > collision > numerical > timeout）
+        end_success   = terminated_success
+        end_collision = terminated_collision & ~end_success
+        end_numerical = terminated_numerical & ~(end_success | end_collision)
+        end_timeout   = time_out & ~(end_success | end_collision | end_numerical)
+        end_total     = end_success | end_collision | end_numerical | end_timeout
+        # 计算统计量
+        end_total_count = end_total.sum().to(torch.float32)
+        zero = torch.zeros_like(end_total_count)
+        succ_ratio = torch.where(end_total_count > 0, end_success.float().sum() / end_total_count, zero)
+        collision_ratio = torch.where(end_total_count > 0, end_collision.float().sum() / end_total_count, zero)
+        numerical_ratio = torch.where(end_total_count > 0, end_numerical.float().sum() / end_total_count, zero)
+        timeout_ratio = torch.where(end_total_count > 0, end_timeout.float().sum() / end_total_count, zero)
+        # 记录到日志
+        self.extras["log"].update({
+            # count（数量）
+            "End / Total (count)"    : end_total_count,
+            "End / Success (count)"  : end_success.sum().to(torch.float32),
+            "End / Collision (count)": end_collision.sum().to(torch.float32),
+            "End / Numerical (count)": end_numerical.sum().to(torch.float32),
+            "End / Timeout (count)"  : end_timeout.sum().to(torch.float32),
+            # ratio（比例）
+            "End / Success (ratio)"  : succ_ratio,
+            "End / Collision (ratio)": collision_ratio,
+            "End / Numerical (ratio)": numerical_ratio,
+            "End / Timeout (ratio)"  : timeout_ratio,
+        })
+
+        return terminated, time_out
+
+
+
+
+    def _get_rewards(self) -> torch.Tensor:
+        """
+        Calculate the reward for each environment.
+        """
+
+        reward_cfg = self.cfg.reward
+        robot_data = self._robot.data
+
+        # Current position, orientation, and velocity of the robot
+        pos_w = robot_data.root_state_w[:, :3]
+        rot_E_w = torch.stack(euler_xyz_from_quat(robot_data.root_state_w[:, 3:7]), dim=1)
+        rot_E_w = torch.stack([normallize_angle(rot_E_w[:, 0]), normallize_angle(rot_E_w[:, 1]), normallize_angle(rot_E_w[:, 2])], dim=1)
+        vel_b = robot_data.root_lin_vel_b
+
+
+        goal_completion_mask, _ = self._point_provider.update()
+        self._desired_pos_w.copy_(self._point_provider.get_target_points())
+
+
+        # ----------------------------------------
+        # 计算每项奖励和惩罚
+        # ----------------------------------------
+        # TODO: 重新思考抵达目标点+保持期望速度的奖励机制（比如可参考 “Extreme Parkour” 文章的内积设计）
+        # distance to goal center
+        distance_to_gap = (pos_w - self._desired_pos_w).norm(dim=1)
+        last_distance_to_gap = (self._last_pos_w - self._desired_pos_w).norm(dim=1)
+        delta_distance = last_distance_to_gap - distance_to_gap
+        distance_reward = torch.clamp(delta_distance / reward_cfg.delta_distance_clamp, min=-1.0, max=1.0)
+
+        # TODO: 重新思考抵达目标点+保持期望速度的奖励机制（比如可参考 “Extreme Parkour” 文章的内积设计）
+        # direction penalty [-2, 0]
+        # (We define a "forward" direction as +X in world space for illustration.)
+        rot_M_w = matrix_from_quat(robot_data.root_quat_w)
+        dir_body_w = rot_M_w[:, 0:2, 0] / (rot_M_w[:, 0:2, 0].norm(dim=1, keepdim=True) + 1e-6)  # Forward direction in world frame
+        dir_to_goal = (self._desired_pos_w - pos_w)[:, :2]
+        dir_to_goal = dir_to_goal / (dir_to_goal.norm(dim=-1, keepdim=True) + 1e-6)
+        yaw_direction_penalty = (dir_body_w * dir_to_goal).sum(dim=-1) - 1.0
+
+        # action magnitude penalty [-6, 0]
+        # shape is (num_envs, 4) -> thrust + rates
+        # Apply different weights to each action dimension for magnitude calculation
+        action_weights = torch.tensor([1.0, 1.0, 1.0, 1.0], device=self.device)  # [thrust, bodyrate(x, y, z)] # TODO set action_weights to 0
+        weighted_actions = self._actions * action_weights
+        action_magnitude_penalty = -weighted_actions.norm(dim=1)
+
+        # action change penalty (difference relative to last actions) [-4, 0]
+        diff_actions = self._actions - self._last_actions
+        # Apply different weights to each action dimension
+        action_weights = torch.tensor([1.0, 1.0, 1.0, 1.0], device=self.device)  # [thrust, bodyrate(x, y, z)]
+        weighted_diff_actions = diff_actions * action_weights
+        action_change_penalty = -weighted_diff_actions.norm(dim=1)
+
+        # Velocity-related rewards and penalties - now separated into individual components
+        speed = vel_b.norm(dim=1)
+        distance_to_goal = (pos_w - self._desired_pos_w).norm(dim=1)
+
+        # TODO: 重新思考抵达目标点+保持期望速度的奖励机制（比如可参考 “Extreme Parkour” 文章的内积设计）
+        # TODO: 评估全向视野感知下是否需要加入速度方向奖励
+        # Velocity direction penalty [-inf, 0]
+        # Penalize deviations from forward (+X body axis) scaled by speed, shaped with Huber loss
+        safe_speed = torch.clamp(speed, min=1e-6)
+        cos_forward = torch.clamp(vel_b[:, 0] / safe_speed, -1.0, 1.0)
+        direction_misalignment = speed * (1.0 - cos_forward)
+        vel_dir_delta = max(reward_cfg.vel_direction_huber_delta, 1e-6)
+        vel_dir_delta_tensor = torch.tensor(vel_dir_delta, device=self.device, dtype=direction_misalignment.dtype)
+        quadratic_region = 0.5 * direction_misalignment.square() / vel_dir_delta_tensor
+        linear_region = direction_misalignment - 0.5 * vel_dir_delta_tensor
+        vel_direction_penalty = -torch.where(direction_misalignment <= vel_dir_delta_tensor, quadratic_region, linear_region)
+
+        # Adjust desired speed based on distance to goal
+        # Linearly decrease speed when within distance threshold of goal
+        speed_adjust_start = reward_cfg.speed_adjustment_distance  # Start slowing down
+        speed_adjust_end = 0.0   # Speed should be zero
+        slowdown_factor = torch.clamp((speed_adjust_start - distance_to_goal) / (speed_adjust_start - speed_adjust_end), 0.0, 1.0)
+        yaw_direction_penalty = yaw_direction_penalty * (1.0 - slowdown_factor)
+        yaw_direction_penalty = torch.where(
+            distance_to_goal < self.cfg.hover_yaw_penalty_distance,
+            torch.zeros_like(yaw_direction_penalty),
+            yaw_direction_penalty,
+        )
+
+
+        # TODO: 可以抽象为目标管理对象
+        # Adjust desired speed: original speed when far, 0 when at goal
+        desired_speed = self._desired_speed_init.squeeze(-1) * (1.0 - slowdown_factor)
+        self._desired_speed = desired_speed.unsqueeze(-1)  # Ensure it's a column vector
+
+
+        # Speed magnitude penalty [-5, 0]
+        # Penalize when speed exceeds desired speed (now using adjusted desired_speed)
+        vel_speed_excess_penalty = torch.where(
+            speed > desired_speed,
+            -torch.clamp(torch.exp((speed - desired_speed) * 5) - 1.0, max=5.0),
+            torch.zeros_like(speed)
+        )
+
+        # TODO: 重新思考抵达目标点+保持期望速度的奖励机制（比如可参考 “Extreme Parkour” 文章的内积设计）
+        # Velocity matching reward [0, 2]
+        # Reward for having speed close to desired speed (now using adjusted desired_speed)
+        vel_speed_match_reward = torch.exp(-5.0 * torch.abs(speed - desired_speed)) * 2.0
+
+        # z position penalty shaped with Huber loss [-5, 0]
+        z_pos = pos_w[:, 2]
+        z_err = z_pos - self._desired_pos_w[:, 2]
+        delta = max(reward_cfg.z_position_huber_delta, 1e-6)
+        delta_tensor = torch.tensor(delta, device=self.device, dtype=z_pos.dtype)
+        abs_z_err = torch.abs(z_err)
+        quadratic_region = 0.5 * abs_z_err.square() / delta_tensor
+        linear_region = abs_z_err - 0.5 * delta_tensor
+        z_position_penalty = -torch.where(abs_z_err <= delta_tensor, quadratic_region, linear_region)
+
+        # collision penalty. [-1, 0]
+        obstacle_collision_penalty = torch.where(
+            self._is_contact,
+            torch.ones_like(vel_b[:, 0]),
+            torch.zeros_like(vel_b[:, 0]),
+        )
+        obstacle_collision_penalty = -obstacle_collision_penalty
+
+        # # Perform KD-tree query once to get nearest obstacle distances
+        # nearest_obstacle_distances = None
+        # if self.occ_kdtree is not None:
+        #     d, _ = self.occ_kdtree.query(pos_w.cpu(), workers=-1, distance_upper_bound=4.0)
+        #     nearest_obstacle_distances = torch.tensor(d, dtype=pos_w.dtype, device=self.device)
+
+        # # ESDF-based reward
+        # esdf_reward = torch.zeros_like(vel_b[:, 0])
+        # if nearest_obstacle_distances is not None:
+        #     safe_threshold = 0.5
+        #     esdf_reward = torch.where(
+        #         nearest_obstacle_distances < safe_threshold,
+        #         -(torch.exp(5.0 * (safe_threshold - nearest_obstacle_distances)) - 1.0),
+        #         torch.zeros_like(nearest_obstacle_distances),
+        #     )
+
+
+        # Succeed reward [0, 1] - only for individual goal completion
+        succeed_reward = goal_completion_mask.float()
+
+        # Angular velocity penalty
+        max_angular_velocity = reward_cfg.max_angular_velocity_penalty # rad/s
+        ang_vel_b = robot_data.root_ang_vel_b.clone() # (num_envs, 3)
+        max_ang_vel_penalty = torch.where(
+            torch.abs(ang_vel_b) > max_angular_velocity,
+            -torch.clamp(torch.exp(torch.abs(torch.abs(ang_vel_b) - max_angular_velocity)) - 1.0, max=10.0),
+            torch.zeros_like(ang_vel_b),
+        ) # (num_envs, 3) -> (num_envs,)
+        max_ang_vel_penalty = torch.sum(max_ang_vel_penalty, dim=1)
+
+        # Angle penalty [-20, 0]
+        max_angle = reward_cfg.max_angle_penalty # rad
+        max_angle_penalty = torch.where(
+            torch.abs(rot_E_w[:, :2]) > max_angle,
+            -torch.clamp(torch.exp(torch.abs(torch.abs(rot_E_w[:, :2]) - max_angle)) - 1.0, max=10.0),
+            torch.zeros_like(rot_E_w[:, :2]),
+        )
+        max_angle_penalty = torch.sum(max_angle_penalty, dim=1)
+
+        # TODO: 审查 z_vel 惩罚的设置意图；注意此处坐标系选取是在 body 系下，是否需要换到 world 系下？
+        # z velocity penalty [-1, 0]
+        z_vel_diff = torch.abs(vel_b[:, 2])
+        z_vel_penalty = -torch.clamp(z_vel_diff, max=1.0)
+
+        # TODO: 不置 0 可能会导致拖延完成任务时间
+        # Alive reward (before collision) [0, 1]
+        alive_reward = torch.logical_not(torch.logical_or(self._is_success, self._is_contact)).float()
+
+        # # TODO: 意图不名，是惩罚吗？
+        # lin_vel = torch.sum(torch.square(robot_data.root_lin_vel_b), dim=1)
+        # ang_vel = torch.sum(torch.square(robot_data.root_ang_vel_b), dim=1)
+
+        # # TODO: 重新思考抵达目标点+保持期望速度的奖励机制（比如可参考 “Extreme Parkour” 文章的内积设计）
+        # distance_to_goal_mapped = 1 - torch.tanh(distance_to_goal / reward_cfg.distance_goal_mapping_scale)
+
+        # ----------------------------------------
+        # 计算总奖励，并记录各项奖励到日志
+        # ----------------------------------------
+        reward_specs = [
+            ("distance_reward",            distance_reward,            reward_cfg.coef_distance_reward),
+            ("yaw_direction_penalty",      yaw_direction_penalty,      reward_cfg.coef_yaw_direction_penalty),
+            ("action_magnitude_penalty",   action_magnitude_penalty,   reward_cfg.coef_action_magnitude_penalty),
+            ("action_change_penalty",      action_change_penalty,      reward_cfg.coef_action_change_penalty),
+            ("vel_direction_penalty",      vel_direction_penalty,      reward_cfg.coef_vel_direction_penalty),
+            ("vel_speed_excess_penalty",   vel_speed_excess_penalty,   reward_cfg.coef_vel_speed_excess_penalty),
+            ("vel_speed_match_reward",     vel_speed_match_reward,     reward_cfg.coef_vel_speed_match_reward),
+            ("z_position_penalty",         z_position_penalty,         reward_cfg.coef_z_position_penalty),
+            ("obstacle_collision_penalty", obstacle_collision_penalty, reward_cfg.coef_obstacle_collision_penalty),
+            # ("esdf_reward",                esdf_reward,                reward_cfg.coef_esdf_reward),
+            ("succeed_reward",             succeed_reward,             reward_cfg.coef_succeed_reward),
+            ("max_ang_vel_penalty",        max_ang_vel_penalty,        reward_cfg.coef_max_ang_vel_penalty),
+            ("max_angle_penalty",          max_angle_penalty,          reward_cfg.coef_max_angle_penalty),
+            ("alive_reward",               alive_reward,               reward_cfg.coef_alive_reward),
+            ("z_vel_penalty",              z_vel_penalty,              reward_cfg.coef_z_vel_penalty),
+            # ("lin_vel_reward",             lin_vel,                    reward_cfg.coef_lin_vel_reward_scale),
+            # ("ang_vel_reward",             ang_vel,                    reward_cfg.coef_ang_vel_reward_scale),
+            # ("distance_to_goal_reward",    distance_to_goal_mapped,    reward_cfg.coef_distance_to_goal_reward_scale),
+        ]
+        # 剔除权重为0的项
+        reward_specs = [(n, t, w) for (n, t, w) in reward_specs if w != 0.0]
+        # 提取各项奖励名称、原始数值和权重
+        names = [n for n, _, _ in reward_specs]
+        raw_terms = torch.stack([t for _, t, _ in reward_specs], dim=1)  # (N, K)
+        weights = raw_terms.new_tensor([w for _, _, w in reward_specs])  # (K,) 自动对齐 device/dtype
+        # 计算加权奖励、总和、均值
+        weighted_terms = raw_terms * weights        # (N, K)
+        reward_per_env = weighted_terms.sum(dim=1)  # (N,)
+        mean_weighted_terms = weighted_terms.mean(dim=0)  # (K,)
+        reward_env_mean   = reward_per_env.mean()         # scalar
+        # 记录到日志（skrl会自动处理无前缀 log name，加上 Info / 前缀）
+        self.extras["log"].update({f"{names[i]}": mean_weighted_terms[i] for i in range(len(names))})
+        self.extras["log"]["total"] = reward_env_mean
+
+        # ----------------------------------------
+        # 更新 “上一时刻” 数据
+        # ----------------------------------------
+        self._last_pos_w.copy_(pos_w)
+        self._last_actions.copy_(self._actions)
+
+        return reward_per_env
+
+
+
+
+    def _reset_idx(self, env_ids: torch.Tensor | None):
+        """Reset specific environment indexes."""
+
+        if env_ids is None or len(env_ids) == self.num_envs:
+            env_ids = self._robot._ALL_INDICES
+
+        # TODO: 考虑抽象为多地图管理器对象
+        # Always call regenerate terrain on reset to maintain map data
+        self._regenerate_terrain()
+
+
+        # TODO: 待测试并加入油门不确定度、风扰动
+        # # Reset wind generator for the environments being reset
+        # self._wind_gen.reset(env_ids)
+        # # Reset thrust uncertainty for the environments being reset
+        # if self._thrust_uncertainty is not None:
+        #     self._thrust_uncertainty.reset(env_ids)
+
+
+        # Reset height randomizer later after initial positions are set
+
+        # Determine episode outcomes for completed episodes
+        success_mask = self._is_success[env_ids]
+        died_mask = torch.logical_and(self.reset_terminated[env_ids], ~success_mask)
+        timed_out_mask = self.reset_time_outs[env_ids]
+
+
+        # TODO: 考虑抽象为回合评估统计对象
+        # Update episode outcomes and metrics
+        # self._update_episode_outcomes_and_metrics(env_ids, success_mask, died_mask, timed_out_mask)
+
+
+        # Reset environment states
+        self._robot.reset(env_ids)
+        # Parent method sets done buffers, etc.
+        super()._reset_idx(env_ids)
+
+        # Assign reset environments to the active map
+        self._env_map_assignments[env_ids] = self._active_map_id
+
+
+        self._desired_speed_init[env_ids] = torch.zeros_like(self._desired_speed_init[env_ids]).uniform_(*self.cfg.des_vel_range)
+        self._desired_speed[env_ids] = self._desired_speed_init[env_ids]
+
+        self._point_provider.resample(env_ids)
+        self._desired_pos_w[env_ids] = self._point_provider.get_target_points()[env_ids]
+
+
+        # TODO: 评估是否需要抽象为初始位置采样对象
+        joint_pos = self._robot.data.default_joint_pos[env_ids].clone()
+        joint_vel = self._robot.data.default_joint_vel[env_ids].clone()
+        default_root_state = self._robot.data.default_root_state[env_ids].clone()
+
+        default_root_state[:, :3] = self._point_provider.get_spawn_points()[env_ids]
+
+        # Apply random yaw rotation to the initial root state
+        initial_random_yaw = torch.zeros_like(default_root_state[:, 0]).uniform_(-math.pi, math.pi)
+        default_root_state[:, 3] = torch.cos(initial_random_yaw * 0.5)  # w
+        default_root_state[:, 6] = torch.sin(initial_random_yaw * 0.5)  # z
+        default_root_state[:, 4] = 0.0  # x
+        default_root_state[:, 5] = 0.0  # y
+
+        self._robot.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
+        self._robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
+        self._robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
+
+
+
+        # 重置 “上一时刻” 数据
+        self._last_pos_w[env_ids] = default_root_state[:, :3]
+        self._last_actions[env_ids] = torch.zeros(4, device=self.device)
+
+        # 重置 done 相关标志
+        self._numerical_instability[env_ids] = False
+        self._is_contact[env_ids] = False
+        self._is_success[env_ids] = False
+
+
+        # TODO: 待测试并加入高度平滑
+        # # Reset height randomizer with initial positions now that they are set
+        # if self._height_randomizer is not None:
+        #     initial_positions = default_root_state[:, :3]  # [x, y, z] coordinates
+        #     self._height_randomizer.reset(env_ids, initial_positions)
+
+
+        # TODO: 考虑抽象为回合评估统计对象
+        # Reset episode outcome tracking for the reset environments
+        self._episode_outcomes[env_ids] = 0
+
+
+
+    
     def _get_observations(self) -> dict:
         """
         Return the observations for the agent in a dictionary.
@@ -537,6 +855,7 @@ class QuadcopterEnv(DirectRLEnv):
         # 多相机深度图像
         max_d = self.cfg.depth_cameras.max_distance
         depth_image_list = self._depth_cameras.read_batch()
+        # print(depth_image.shape)
 
         # 深度图像 (TODO: 待加入噪声)
         # # (N, C, H, W) Normalize to [0, 1] and scale
@@ -670,512 +989,6 @@ class QuadcopterEnv(DirectRLEnv):
 
 
 
-    def _get_rewards(self) -> torch.Tensor:
-        """
-        Calculate the reward for each environment.
-        """
-
-        reward_cfg = self.cfg.reward
-        robot_data = self._robot.data
-
-        # Current position, orientation, and velocity of the robot
-        pos_w = robot_data.root_state_w[:, :3]
-        rot_E_w = torch.stack(euler_xyz_from_quat(robot_data.root_state_w[:, 3:7]), dim=1)
-        rot_E_w = torch.stack([normallize_angle(rot_E_w[:, 0]), normallize_angle(rot_E_w[:, 1]), normallize_angle(rot_E_w[:, 2])], dim=1)
-        vel_b = robot_data.root_lin_vel_b
-
-
-
-        goal_completion_mask, _ = self._point_provider.update()
-        self._desired_pos_w = self._point_provider.get_target_points()
-
-
-        # ----------------------------------------
-        # 计算每项奖励和惩罚
-        # ----------------------------------------
-        # TODO: 重新思考抵达目标点+保持期望速度的奖励机制（比如可参考 “Extreme Parkour” 文章的内积设计）
-        # distance to goal center
-        distance_to_gap = (pos_w - self._desired_pos_w).norm(dim=1)
-        last_distance_to_gap = (self._last_pos_w - self._desired_pos_w).norm(dim=1)
-        delta_distance = last_distance_to_gap - distance_to_gap
-        distance_reward = torch.clamp(delta_distance / reward_cfg.delta_distance_clamp, min=-1.0, max=1.0)
-
-        # TODO: 重新思考抵达目标点+保持期望速度的奖励机制（比如可参考 “Extreme Parkour” 文章的内积设计）
-        # direction penalty [-2, 0]
-        # (We define a "forward" direction as +X in world space for illustration.)
-        rot_M_w = matrix_from_quat(robot_data.root_quat_w)
-        dir_body_w = rot_M_w[:, 0:2, 0] / (rot_M_w[:, 0:2, 0].norm(dim=1, keepdim=True) + 1e-6)  # Forward direction in world frame
-        dir_to_goal = (self._desired_pos_w - pos_w)[:, :2]
-        dir_to_goal = dir_to_goal / (dir_to_goal.norm(dim=-1, keepdim=True) + 1e-6)
-        yaw_direction_penalty = (dir_body_w * dir_to_goal).sum(dim=-1) - 1.0
-
-        # action magnitude penalty [-6, 0]
-        # shape is (num_envs, 4) -> thrust + rates
-        # Apply different weights to each action dimension for magnitude calculation
-        action_weights = torch.tensor([1.0, 1.0, 1.0, 1.0], device=self.device)  # [thrust, bodyrate(x, y, z)] # TODO set action_weights to 0
-        weighted_actions = self._actions * action_weights
-        action_magnitude_penalty = -weighted_actions.norm(dim=1)
-
-        # action change penalty (difference relative to last actions) [-4, 0]
-        diff_actions = self._actions - self._last_actions
-        # Apply different weights to each action dimension
-        action_weights = torch.tensor([1.0, 1.0, 1.0, 1.0], device=self.device)  # [thrust, bodyrate(x, y, z)]
-        weighted_diff_actions = diff_actions * action_weights
-        action_change_penalty = -weighted_diff_actions.norm(dim=1)
-
-        # Velocity-related rewards and penalties - now separated into individual components
-        speed = vel_b.norm(dim=1)
-        distance_to_goal = (pos_w - self._desired_pos_w).norm(dim=1)
-
-        # TODO: 重新思考抵达目标点+保持期望速度的奖励机制（比如可参考 “Extreme Parkour” 文章的内积设计）
-        # TODO: 评估全向视野感知下是否需要加入速度方向奖励
-        # Velocity direction penalty [-inf, 0]
-        # Penalize deviations from forward (+X body axis) scaled by speed, shaped with Huber loss
-        safe_speed = torch.clamp(speed, min=1e-6)
-        cos_forward = torch.clamp(vel_b[:, 0] / safe_speed, -1.0, 1.0)
-        direction_misalignment = speed * (1.0 - cos_forward)
-        vel_dir_delta = max(reward_cfg.vel_direction_huber_delta, 1e-6)
-        vel_dir_delta_tensor = torch.tensor(vel_dir_delta, device=self.device, dtype=direction_misalignment.dtype)
-        quadratic_region = 0.5 * direction_misalignment.square() / vel_dir_delta_tensor
-        linear_region = direction_misalignment - 0.5 * vel_dir_delta_tensor
-        vel_direction_penalty = -torch.where(direction_misalignment <= vel_dir_delta_tensor, quadratic_region, linear_region)
-
-        # Adjust desired speed based on distance to goal
-        # Linearly decrease speed when within distance threshold of goal
-        speed_adjust_start = reward_cfg.speed_adjustment_distance  # Start slowing down
-        speed_adjust_end = 0.0   # Speed should be zero
-        slowdown_factor = torch.clamp((speed_adjust_start - distance_to_goal) / (speed_adjust_start - speed_adjust_end), 0.0, 1.0)
-        yaw_direction_penalty = yaw_direction_penalty * (1.0 - slowdown_factor)
-        yaw_direction_penalty = torch.where(
-            distance_to_goal < self.cfg.hover_yaw_penalty_distance,
-            torch.zeros_like(yaw_direction_penalty),
-            yaw_direction_penalty,
-        )
-
-
-        # TODO: 可以抽象为目标管理对象
-        # Adjust desired speed: original speed when far, 0 when at goal
-        desired_speed = self._desired_speed_init.squeeze(-1) * (1.0 - slowdown_factor)
-        self._desired_speed = desired_speed.unsqueeze(-1)  # Ensure it's a column vector
-
-
-        # Speed magnitude penalty [-5, 0]
-        # Penalize when speed exceeds desired speed (now using adjusted desired_speed)
-        vel_speed_excess_penalty = torch.where(
-            speed > desired_speed,
-            -torch.clamp(torch.exp((speed - desired_speed) * 5) - 1.0, max=5.0),
-            torch.zeros_like(speed)
-        )
-
-        # TODO: 重新思考抵达目标点+保持期望速度的奖励机制（比如可参考 “Extreme Parkour” 文章的内积设计）
-        # Velocity matching reward [0, 2]
-        # Reward for having speed close to desired speed (now using adjusted desired_speed)
-        vel_speed_match_reward = torch.exp(-5.0 * torch.abs(speed - desired_speed)) * 2.0
-
-        # z position penalty shaped with Huber loss [-5, 0]
-        z_pos = pos_w[:, 2]
-        z_err = z_pos - self._desired_pos_w[:, 2]
-        delta = max(reward_cfg.z_position_huber_delta, 1e-6)
-        delta_tensor = torch.tensor(delta, device=self.device, dtype=z_pos.dtype)
-        abs_z_err = torch.abs(z_err)
-        quadratic_region = 0.5 * abs_z_err.square() / delta_tensor
-        linear_region = abs_z_err - 0.5 * delta_tensor
-        z_position_penalty = -torch.where(abs_z_err <= delta_tensor, quadratic_region, linear_region)
-
-        # collision penalty. [-1, 0]
-        obstacle_collision_penalty = torch.where(
-            self._is_contact,
-            torch.ones_like(vel_b[:, 0]),
-            torch.zeros_like(vel_b[:, 0]),
-        )
-        obstacle_collision_penalty = -obstacle_collision_penalty
-
-        # # Perform KD-tree query once to get nearest obstacle distances
-        # nearest_obstacle_distances = None
-        # if self.occ_kdtree is not None:
-        #     d, _ = self.occ_kdtree.query(pos_w.cpu(), workers=-1, distance_upper_bound=4.0)
-        #     nearest_obstacle_distances = torch.tensor(d, dtype=pos_w.dtype, device=self.device)
-
-        # # ESDF-based reward
-        # esdf_reward = torch.zeros_like(vel_b[:, 0])
-        # if nearest_obstacle_distances is not None:
-        #     safe_threshold = 0.5
-        #     esdf_reward = torch.where(
-        #         nearest_obstacle_distances < safe_threshold,
-        #         -(torch.exp(5.0 * (safe_threshold - nearest_obstacle_distances)) - 1.0),
-        #         torch.zeros_like(nearest_obstacle_distances),
-        #     )
-
-        
-        # # TODO: 可以抽象为目标管理对象
-        # # TODO: 检查 is_success 逻辑
-        # # Goal completion and queue management
-        # active_envs = ~self._is_success
-        # hover_mask = torch.logical_and(distance_to_goal < self.cfg.hover_hold_distance_threshold, speed < self.cfg.hover_hold_speed_threshold)
-        # hover_mask = torch.logical_and(hover_mask, active_envs)
-        # new_counters = torch.where(
-        #     hover_mask,
-        #     self._hover_hold_counter_s + self.step_dt,
-        #     torch.zeros_like(self._hover_hold_counter_s),
-        # )
-        # self._hover_hold_counter_s = new_counters
-        # goal_reached = torch.logical_and(hover_mask, self._hover_hold_counter_s >= self._hover_hold_requirement_s)
-
-        # # Process goal completion for environments that haven't finished all goals
-        # goal_completion_mask = torch.logical_and(active_envs, goal_reached)
-
-        # if torch.any(goal_completion_mask):
-        #     completed_env_ids = torch.where(goal_completion_mask)[0]
-        #     self._hover_hold_counter_s[completed_env_ids] = 0.0
-
-        #     # Advance to next goal for environments that completed current goal
-        #     self._current_goal_index[completed_env_ids] += 1
-        #     self._num_goals_remaining[completed_env_ids] -= 1
-
-        #     # Check which environments completed all goals
-        #     all_goals_completed = self._num_goals_remaining[completed_env_ids] <= 0
-        #     final_success_env_ids = completed_env_ids[all_goals_completed]
-
-        #     # Mark environments as successful if they completed all goals
-        #     if len(final_success_env_ids) > 0:
-        #         # TODO: 此处成功检测会导致 get_done / reset_idx 滞后触发
-        #         self._is_success[final_success_env_ids] = True
-
-        #     # Update current goal for environments that still have goals remaining
-        #     continuing_env_ids = completed_env_ids[~all_goals_completed]
-        #     if len(continuing_env_ids) > 0:
-        #         self._update_current_goal(continuing_env_ids)
-
-
-        # Succeed reward [0, 1] - only for individual goal completion
-        succeed_reward = goal_completion_mask.float()
-
-        # Angular velocity penalty
-        max_angular_velocity = reward_cfg.max_angular_velocity_penalty # rad/s
-        ang_vel_b = robot_data.root_ang_vel_b.clone() # (num_envs, 3)
-        max_ang_vel_penalty = torch.where(
-            torch.abs(ang_vel_b) > max_angular_velocity,
-            -torch.clamp(torch.exp(torch.abs(torch.abs(ang_vel_b) - max_angular_velocity)) - 1.0, max=10.0),
-            torch.zeros_like(ang_vel_b),
-        ) # (num_envs, 3) -> (num_envs,)
-        max_ang_vel_penalty = torch.sum(max_ang_vel_penalty, dim=1)
-
-        # Angle penalty [-20, 0]
-        max_angle = reward_cfg.max_angle_penalty # rad
-        max_angle_penalty = torch.where(
-            torch.abs(rot_E_w[:, :2]) > max_angle,
-            -torch.clamp(torch.exp(torch.abs(torch.abs(rot_E_w[:, :2]) - max_angle)) - 1.0, max=10.0),
-            torch.zeros_like(rot_E_w[:, :2]),
-        )
-        max_angle_penalty = torch.sum(max_angle_penalty, dim=1)
-
-        # TODO: 审查 z_vel 惩罚的设置意图；注意此处坐标系选取是在 body 系下，是否需要换到 world 系下？
-        # z velocity penalty [-1, 0]
-        z_vel_diff = torch.abs(vel_b[:, 2])
-        z_vel_penalty = -torch.clamp(z_vel_diff, max=1.0)
-
-        # TODO: 不置 0 可能会导致拖延完成任务时间
-        # Alive reward (before collision) [0, 1]
-        alive_reward = torch.logical_not(torch.logical_or(self._is_success, self._is_contact)).float()
-
-        # # TODO: 意图不名，是惩罚吗？
-        # lin_vel = torch.sum(torch.square(robot_data.root_lin_vel_b), dim=1)
-        # ang_vel = torch.sum(torch.square(robot_data.root_ang_vel_b), dim=1)
-
-        # # TODO: 重新思考抵达目标点+保持期望速度的奖励机制（比如可参考 “Extreme Parkour” 文章的内积设计）
-        # distance_to_goal_mapped = 1 - torch.tanh(distance_to_goal / reward_cfg.distance_goal_mapping_scale)
-
-        # ----------------------------------------
-        # 计算总奖励，并记录各项奖励到日志
-        # ----------------------------------------
-        reward_specs = [
-            ("distance_reward",            distance_reward,            reward_cfg.coef_distance_reward),
-            ("yaw_direction_penalty",      yaw_direction_penalty,      reward_cfg.coef_yaw_direction_penalty),
-            ("action_magnitude_penalty",   action_magnitude_penalty,   reward_cfg.coef_action_magnitude_penalty),
-            ("action_change_penalty",      action_change_penalty,      reward_cfg.coef_action_change_penalty),
-            ("vel_direction_penalty",      vel_direction_penalty,      reward_cfg.coef_vel_direction_penalty),
-            ("vel_speed_excess_penalty",   vel_speed_excess_penalty,   reward_cfg.coef_vel_speed_excess_penalty),
-            ("vel_speed_match_reward",     vel_speed_match_reward,     reward_cfg.coef_vel_speed_match_reward),
-            ("z_position_penalty",         z_position_penalty,         reward_cfg.coef_z_position_penalty),
-            ("obstacle_collision_penalty", obstacle_collision_penalty, reward_cfg.coef_obstacle_collision_penalty),
-            # ("esdf_reward",                esdf_reward,                reward_cfg.coef_esdf_reward),
-            ("succeed_reward",             succeed_reward,             reward_cfg.coef_succeed_reward),
-            ("max_ang_vel_penalty",        max_ang_vel_penalty,        reward_cfg.coef_max_ang_vel_penalty),
-            ("max_angle_penalty",          max_angle_penalty,          reward_cfg.coef_max_angle_penalty),
-            ("alive_reward",               alive_reward,               reward_cfg.coef_alive_reward),
-            ("z_vel_penalty",              z_vel_penalty,              reward_cfg.coef_z_vel_penalty),
-            # ("lin_vel_reward",             lin_vel,                    reward_cfg.coef_lin_vel_reward_scale),
-            # ("ang_vel_reward",             ang_vel,                    reward_cfg.coef_ang_vel_reward_scale),
-            # ("distance_to_goal_reward",    distance_to_goal_mapped,    reward_cfg.coef_distance_to_goal_reward_scale),
-        ]
-        # 剔除权重为0的项
-        reward_specs = [(n, t, w) for (n, t, w) in reward_specs if w != 0.0]
-        # 提取各项奖励名称、原始数值和权重
-        names = [n for n, _, _ in reward_specs]
-        raw_terms = torch.stack([t for _, t, _ in reward_specs], dim=1)  # (N, K)
-        weights = raw_terms.new_tensor([w for _, _, w in reward_specs])  # (K,) 自动对齐 device/dtype
-        # 计算加权奖励、总和、均值
-        weighted_terms = raw_terms * weights        # (N, K)
-        reward_per_env = weighted_terms.sum(dim=1)  # (N,)
-        mean_weighted_terms = weighted_terms.mean(dim=0)  # (K,)
-        reward_env_mean   = reward_per_env.mean()         # scalar
-        # 记录到日志（skrl会自动处理无前缀 log name，加上 Info / 前缀）
-        self.extras["log"].update({f"{names[i]}": mean_weighted_terms[i] for i in range(len(names))})
-        self.extras["log"]["total"] = reward_env_mean
-
-        # ----------------------------------------
-        # 更新 “上一时刻” 数据
-        # ----------------------------------------
-        self._last_pos_w.copy_(pos_w)
-        self._last_actions.copy_(self._actions)
-
-        return reward_per_env
-
-
-
-
-    def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
-        """Define terminations and timeouts."""
-
-        # -------------------------
-        # 计算各类结束条件
-        # -------------------------
-        # 计算回合超时的 env
-        time_out = self.episode_length_buf >= self.max_episode_length - 1
-
-        # 计算发生碰撞的 env
-        net_forces = self._contact_sensor.data.net_forces_w_history  # (N, T, B, 3)
-        selected = net_forces[:, :, self._undesired_contact_ids, :]  # (N, T, K, 3)
-        max_contact, _ = torch.norm(selected, dim=-1).max(dim=1)     # (N, K)
-        self._is_contact = (max_contact > self.cfg.contact_force_threshold).any(dim=1)  # Threshold is important for REAL contact detection
-
-        # -------------------------
-        # 计算总结束条件
-        # -------------------------
-        terminated_numerical = self._numerical_instability
-        # TODO: TEMPORARY DISABLE COLLISION TERMINATION
-        terminated_collision = self._is_contact
-        # terminated_collision = torch.zeros_like(self._is_contact)
-        terminated_success   = self._is_success
-
-        terminated = terminated_numerical | terminated_collision | terminated_success
-
-        # -------------------------
-        # 记录回合结束原因到日志（本 step 内“将要结束”的 env 统计）
-        # -------------------------
-        # 构造互斥的结束原因（按优先级：success > collision > numerical > timeout）
-        end_success   = terminated_success
-        end_collision = terminated_collision & ~end_success
-        end_numerical = terminated_numerical & ~(end_success | end_collision)
-        end_timeout   = time_out & ~(end_success | end_collision | end_numerical)
-        end_total     = end_success | end_collision | end_numerical | end_timeout
-        # 计算统计量
-        end_total_count = end_total.sum().to(torch.float32)
-        zero = torch.zeros_like(end_total_count)
-        succ_ratio = torch.where(end_total_count > 0, end_success.float().sum() / end_total_count, zero)
-        collision_ratio = torch.where(end_total_count > 0, end_collision.float().sum() / end_total_count, zero)
-        numerical_ratio = torch.where(end_total_count > 0, end_numerical.float().sum() / end_total_count, zero)
-        timeout_ratio = torch.where(end_total_count > 0, end_timeout.float().sum() / end_total_count, zero)
-        # 记录到日志
-        self.extras["log"].update({
-            # count（数量）
-            "End / Total (count)"    : end_total_count,
-            "End / Success (count)"  : end_success.sum().to(torch.float32),
-            "End / Collision (count)": end_collision.sum().to(torch.float32),
-            "End / Numerical (count)": end_numerical.sum().to(torch.float32),
-            "End / Timeout (count)"  : end_timeout.sum().to(torch.float32),
-            # ratio（比例）
-            "End / Success (ratio)"  : succ_ratio,
-            "End / Collision (ratio)": collision_ratio,
-            "End / Numerical (ratio)": numerical_ratio,
-            "End / Timeout (ratio)"  : timeout_ratio,
-        })
-
-        return terminated, time_out
-
-
-
-
-    def _reset_idx(self, env_ids: torch.Tensor | None):
-        """Reset specific environment indexes."""
-
-        if env_ids is None or len(env_ids) == self.num_envs:
-            env_ids = self._robot._ALL_INDICES
-
-        # TODO: 考虑抽象为多地图管理器对象
-        # Always call regenerate terrain on reset to maintain map data
-        self._regenerate_terrain()
-
-
-        # TODO: 待测试并加入油门不确定度、风扰动
-        # # Reset wind generator for the environments being reset
-        # self._wind_gen.reset(env_ids)
-        # # Reset thrust uncertainty for the environments being reset
-        # if self._thrust_uncertainty is not None:
-        #     self._thrust_uncertainty.reset(env_ids)
-
-
-        # Reset height randomizer later after initial positions are set
-
-        # Determine episode outcomes for completed episodes
-        success_mask = self._is_success[env_ids]
-        died_mask = torch.logical_and(self.reset_terminated[env_ids], ~success_mask)
-        timed_out_mask = self.reset_time_outs[env_ids]
-
-
-        # TODO: 考虑抽象为回合评估统计对象
-        # Update episode outcomes and metrics
-        # self._update_episode_outcomes_and_metrics(env_ids, success_mask, died_mask, timed_out_mask)
-
-
-        # Reset environment states
-        self._robot.reset(env_ids)
-        # Parent method sets done buffers, etc.
-        super()._reset_idx(env_ids)
-
-        # Assign reset environments to the active map
-        self._env_map_assignments[env_ids] = self._active_map_id
-
-
-
-        # # TODO: 可以抽象为目标管理对象
-        # # Get active map data for goal sampling
-        # active_map_data = self._get_current_map_data(self._active_map_id)
-        
-        # # Generate goal queue for each reset environment (vectorized)
-        # num_reset_envs = len(env_ids)
-        # free_points = active_map_data["free_points"]
-
-        # # Vectorized sampling: sample all goals for all environments at once
-        # total_goals_needed = num_reset_envs * self.cfg.num_goals
-        # goal_indices = torch.randint(
-        #     0, len(free_points),
-        #     (total_goals_needed,),
-        #     device=self.device
-        # )
-
-        # # Get all selected free points in one operation
-        # selected_goals = torch.tensor(
-        #     free_points[goal_indices.cpu()],
-        #     device=self.device,
-        #     dtype=torch.float32
-        # )
-
-        # # Reshape to (num_reset_envs, num_goals, 3)
-        # selected_goals = selected_goals.view(num_reset_envs, self.cfg.num_goals, 3)
-
-        # # Add noise to all goals at once
-        # noise_range = self.cfg.goal_sampling_noise_range
-        # noise = (torch.rand(num_reset_envs, self.cfg.num_goals, 3, device=self.device) - 0.5) * 2 * noise_range
-
-        # # Set goal queues for all environments using advanced indexing
-        # self._goal_queue[env_ids] = selected_goals + noise
-
-        # # Reset goal queue tracking
-        # self._current_goal_index[env_ids] = 0
-        # self._num_goals_remaining[env_ids] = self.cfg.num_goals
-
-        # # Update current goal from queue
-        # self._update_current_goal(env_ids)
-        # self._hover_hold_counter_s[env_ids] = 0.0
-
-        self._desired_speed_init[env_ids] = torch.zeros_like(self._desired_speed_init[env_ids]).uniform_(*self.cfg.des_vel_range)
-        self._desired_speed[env_ids] = self._desired_speed_init[env_ids]
-
-        self._point_provider.resample(env_ids)
-        self._desired_pos_w = self._point_provider.get_target_points()
-
-
-
-        # TODO: 评估是否需要抽象为初始位置采样对象
-        joint_pos = self._robot.data.default_joint_pos[env_ids].clone()
-        joint_vel = self._robot.data.default_joint_vel[env_ids].clone()
-        default_root_state = self._robot.data.default_root_state[env_ids].clone()
-
-        default_root_state[:, :3] = self._point_provider.get_spawn_points()[env_ids]
-
-        # # Choose spawn mode based on configuration
-        # if self.cfg.spawn_mode == "edges":
-        #     # Original edge spawning logic
-        #     # Randomly select sides (0=North, 1=East, 2=South, 3=West) and add env origins
-        #     sides = torch.randint(0, 4, (len(env_ids),), device=self.device)
-
-        #     # Generate random offset along edge (-half_size+1 to half_size-1)
-        #     half_size = self.cfg.scene.env_spacing / 2.0
-        #     edge_pos = torch.rand_like(default_root_state[:, 0]) * (self.cfg.scene.env_spacing - 2.0) - half_size + 1.0
-
-        #     # Set positions based on sides (N=0, E=1, S=2, W=3)
-        #     # For x: East side gets +edge, West side gets -edge, North/South get random
-        #     # For y: North side gets +edge, South side gets -edge, East/West get random
-        #     default_root_state[:, 0] = torch.where(sides == 1, half_size + 1.0, torch.where(sides == 3, -half_size - 1.0, edge_pos))
-        #     default_root_state[:, 1] = torch.where(sides == 0, half_size + 1.0, torch.where(sides == 2, -half_size - 1.0, edge_pos))
-
-        #     # Set random heights and add map origin
-        #     default_root_state[:, 2] = torch.rand_like(default_root_state[:, 2]) * 0.7 + 0.3
-        #     default_root_state[:, :3] += torch.tensor(self._map_generators[self._active_map_id].map_origin,
-        #                                              device=self.device, dtype=torch.float32)
-
-        # elif self.cfg.spawn_mode == "free_points":
-        #     # New free point spawning logic - spawn from free points in obstacle area
-        #     # Sample random indices from free points for spawn positions
-        #     spawn_point_indices = torch.randint(
-        #         0, len(free_points),
-        #         (num_reset_envs,),
-        #         device=self.device
-        #     )
-
-        #     # Get selected free points and convert to tensor
-        #     spawn_points = torch.tensor(
-        #         free_points[spawn_point_indices.cpu()],
-        #         device=self.device,
-        #         dtype=torch.float32
-        #     )
-
-        #     # Add environment origins and some noise for spawn positions
-        #     spawn_noise_range = 0.0  # min_clearance=0.20 in map_generators.py, noise free to keep robot positions free
-        #     spawn_noise = (torch.rand(num_reset_envs, 3, device=self.device) - 0.5) * 2 * spawn_noise_range
-        #     default_root_state[:, :3] = spawn_points + spawn_noise
-
-        # else:
-        #     raise ValueError(f"Unknown spawn_mode: {self.cfg.spawn_mode}.")
-
-        # Apply random yaw rotation to the initial root state
-        initial_random_yaw = torch.zeros_like(default_root_state[:, 0]).uniform_(-math.pi, math.pi)
-        default_root_state[:, 3] = torch.cos(initial_random_yaw * 0.5)  # w
-        default_root_state[:, 6] = torch.sin(initial_random_yaw * 0.5)  # z
-        default_root_state[:, 4] = 0.0  # x
-        default_root_state[:, 5] = 0.0  # y
-
-        self._robot.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
-        self._robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
-        self._robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
-
-
-
-        # 重置 “上一时刻” 数据
-        self._last_pos_w[env_ids] = default_root_state[:, :3]
-        self._last_actions[env_ids] = torch.zeros(4, device=self.device)
-
-        # 重置 done 相关标志
-        self._numerical_instability[env_ids] = False
-        self._is_contact[env_ids] = False
-        self._is_success[env_ids] = False
-
-
-        # TODO: 待测试并加入高度平滑
-        # # Reset height randomizer with initial positions now that they are set
-        # if self._height_randomizer is not None:
-        #     initial_positions = default_root_state[:, :3]  # [x, y, z] coordinates
-        #     self._height_randomizer.reset(env_ids, initial_positions)
-
-
-        # TODO: 考虑抽象为回合评估统计对象
-        # Reset episode outcome tracking for the reset environments
-        self._episode_outcomes[env_ids] = 0
-
-
-
-
     def _set_debug_vis_impl(self, debug_vis: bool):
         """Show debug markers if debug_vis is True."""
         # create markers if necessary for the first tome
@@ -1251,6 +1064,45 @@ class QuadcopterEnv(DirectRLEnv):
         self.goal_yaw_visualizer.visualize(self._desired_pos_w, self._desired_yaw_quat)
         self.current_yaw_visualizer.visualize(self._robot.data.root_pos_w, self._robot.data.root_quat_w)
         self.closest_points_visualizer.visualize(self._closest_points)
+
+
+
+
+    def CHECK_NAN(self, tensor):
+            # 1. 计算 NaN 掩码 (GPU 操作)
+            nan_mask = torch.isnan(tensor)
+
+            # 2. 计算每行的 NaN 情况 (GPU 操作)
+            row_nan_mask = nan_mask.any(dim=1)
+            
+            # 3. 直接更新 instability 状态 (全 GPU 操作，无 CPU 同步)
+            # 假设 self._numerical_instability 也在 GPU 上
+            self._numerical_instability.logical_or_(row_nan_mask)
+            
+            # 4. 原地修复数值 (GPU 操作)
+            tensor.nan_to_num_(nan=0.0)
+            
+            # 注意：这里去掉了 print，因为 print 必须打断 GPU 流水线。
+            # 如果确实需要监控，建议使用 TensorBoard 或 wandb 记录 row_nan_mask.sum()
+            
+            return tensor
+
+
+
+
+    def CHECK_state(self):
+        # Limit
+        max_angular_velocity = self.cfg.max_angular_velocity_check # rad/s
+
+        # State
+        ang_vel_b = self._robot.data.root_ang_vel_b
+        # rot_w = torch.stack(euler_xyz_from_quat(self._robot.data.root_quat_w), dim=1) # (num_envs, 3) roll, pitch, yaw
+        # rot_w = torch.stack([normallize_angle(rot_w[:, 0]), normallize_angle(rot_w[:, 1]), normallize_angle(rot_w[:, 2])], dim=1)
+        # print(f"Roll: {rot_w[0, 0]}, Pitch: {rot_w[0, 1]}, Yaw: {rot_w[0, 2]}")
+        # Check if the state is unstable
+        state_is_unstable = torch.any(torch.abs(ang_vel_b) > max_angular_velocity, dim=1)
+
+        self._numerical_instability = torch.logical_or(self._numerical_instability, state_is_unstable)
 
 
 
