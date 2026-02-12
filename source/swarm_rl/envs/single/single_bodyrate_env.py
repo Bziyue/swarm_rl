@@ -861,7 +861,8 @@ class QuadcopterEnv(DirectRLEnv):
         # 深度图像 - 保持原始尺度用于 DeFM 处理
         # 堆叠为 (N, 4, H, W) 格式，DeFM 会在模型中进行预处理
         # 注意：不进行归一化和缩放，DeFM 需要真实尺度的深度图
-        image_raw = torch.stack(depth_image_list, dim=1)  # (N, 4, 128, 128)
+        # 单张深度图: 64×32 (H×W)，4张 2×2 拼接后: 128×64
+        image_raw = torch.stack(depth_image_list, dim=1)  # (N, 4, 64, 32)
         image_noised = image_raw.clone()  # TODO: 可选添加额外噪声
         # print(image_raw.shape)
 

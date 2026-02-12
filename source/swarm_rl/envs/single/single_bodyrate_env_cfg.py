@@ -247,8 +247,9 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
     contact_force_threshold = 0.01  # Minimum contact force for collision detection
 
     # Depth camera array
-    image_width: int = 128
-    image_height: int = 128
+    # 深度图分辨率: 64×32 (H×W), 4张图 2×2 拼接后为 128×64
+    image_width: int = 32
+    image_height: int = 64
     camera_num: int = 4
     depth_cameras: DepthCameraArrayCfg = DepthCameraArrayCfg(
         cameras = [
@@ -291,7 +292,7 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
     action_space = 4  # 1 (thrust) + 3 (bodyrate x, y, z)
 
     # obs-policy
-    # DeFM模型需要 (4, 64, 64) 的深度图输入 (4个相机，每个64x64)
+    # DeFM模型需要 (4, 64, 32) 的深度图输入 (4个相机，每个64x32)，拼接后为 (128, 64)
     observation_space = {
         "image": gym.spaces.Box(low=-float("inf"), high=float("inf"), shape=(camera_num, image_height, image_width), dtype="float32"),
         # 20 = 3 (gyro) + 9 (rot) + 3 (goal) + 1 (speed) + 4 (actions)
