@@ -247,8 +247,8 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
     contact_force_threshold = 0.01  # Minimum contact force for collision detection
 
     # Depth camera array
-    image_width: int = 64
-    image_height: int = 32
+    image_width: int = 128
+    image_height: int = 128
     camera_num: int = 4
     depth_cameras: DepthCameraArrayCfg = DepthCameraArrayCfg(
         cameras = [
@@ -266,7 +266,7 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
 
         prim_path = "/World/envs/env_.*/Robot/body",
         mesh_prim_paths = ["/map_mesh"],
-        max_distance = 4.0,
+        max_distance = 6.0,
         depth_clipping_behavior = "max",
         data_type = "distance_to_image_plane",
         update_period = 0.0,
@@ -274,7 +274,8 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
 
         usd_focal_length=24.0,
         
-        normalize = "0_1",      # 或 "none" / "-1_1"
+        # DeFM需要真实尺度的深度图，不进行归一化
+        normalize = "none",
         flatten = False,
 
         invalid_rate_max = 0.15,
@@ -290,15 +291,16 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
     action_space = 4  # 1 (thrust) + 3 (bodyrate x, y, z)
 
     # obs-policy
+    # DeFM模型需要 (4, 64, 64) 的深度图输入 (4个相机，每个64x64)
     observation_space = {
-        "image": gym.spaces.Box(low=-float("inf"), high=float("inf"), shape=(1, image_height, image_width * camera_num), dtype="float32"),
+        "image": gym.spaces.Box(low=-float("inf"), high=float("inf"), shape=(camera_num, image_height, image_width), dtype="float32"),
         # 20 = 3 (gyro) + 9 (rot) + 3 (goal) + 1 (speed) + 4 (actions)
         "state": gym.spaces.Box(low=-float("inf"), high=float("inf"), shape=(20,), dtype="float32"),
     }
 
     # obs-critic
     state_space = {
-        "image": gym.spaces.Box(low=-float("inf"), high=float("inf"), shape=(1, image_height, image_width * camera_num), dtype="float32"),
+        "image": gym.spaces.Box(low=-float("inf"), high=float("inf"), shape=(camera_num, image_height, image_width), dtype="float32"),
         # 29 = 3 (gyro) + 9 (rot) + 3 (goal) + 1 (speed) + 4 (actions) + 3 (vel) + 3 (goal_dir) + 3 (obstacle_pos)
         "state": gym.spaces.Box(low=-float("inf"), high=float("inf"), shape=(26,), dtype="float32"),
     }

@@ -853,14 +853,16 @@ class QuadcopterEnv(DirectRLEnv):
         # 原始数据读取
         # ----------------------------------------
         # 多相机深度图像
-        max_d = self.cfg.depth_cameras.max_distance
-        depth_image_list = self._depth_cameras.read_batch()
+        # 使用 stage="processed" 获取经过清理的数据（去NaN、应用invalid noise等）
+        # 由于 cfg.normalize="none"，processed 不会做归一化，保留原始尺度给 DeFM
+        depth_image_list = self._depth_cameras.read_batch(stage="processed")
         # print(depth_image.shape)
 
-        # 深度图像 (TODO: 待加入噪声)
-        # # (N, C, H, W) Normalize to [0, 1] and scale
-        # image_noised = image_raw = torch.stack(depth_image_list, dim=1) / max_d * obs_cfg.depth_image_scale
-        image_noised = image_raw = torch.cat(depth_image_list, dim=2).unsqueeze(1) / max_d * obs_cfg.depth_image_scale
+        # 深度图像 - 保持原始尺度用于 DeFM 处理
+        # 堆叠为 (N, 4, H, W) 格式，DeFM 会在模型中进行预处理
+        # 注意：不进行归一化和缩放，DeFM 需要真实尺度的深度图
+        image_raw = torch.stack(depth_image_list, dim=1)  # (N, 4, 128, 128)
+        image_noised = image_raw.clone()  # TODO: 可选添加额外噪声
         # print(image_raw.shape)
 
         # TODO: 待加入多相机类中

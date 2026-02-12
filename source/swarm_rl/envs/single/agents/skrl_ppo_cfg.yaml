@@ -5,16 +5,22 @@ seed: 42
 # https://skrl.readthedocs.io/en/latest/api/utils/model_instantiators.html
 models:
   separate: True # separate actor and critic networks
-  policy:  # see gaussian_model parameters
-    class: CNNMLPPolicy
+  policy:  # DeFM-based policy
+    class: DeFMPolicy
     clip_actions: False
     clip_log_std: True
     min_log_std: -20.0
     max_log_std: 2.0
     initial_log_std: 0.0
-  value:  # see deterministic_model parameters
-    class: CNNMLPValue
+    # DeFM specific
+    defm_model_name: defm_resnet18
+    defm_pretrained_path: null  # 使用默认路径 defm/weights/defm_resnet18.pth
+  value:  # DeFM-based value
+    class: DeFMValue
     clip_actions: False
+    # DeFM specific
+    defm_model_name: defm_resnet18
+    defm_pretrained_path: null
 
 
 # Rollout memory
