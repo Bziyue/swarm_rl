@@ -267,7 +267,7 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
 
         prim_path = "/World/envs/env_.*/Robot/body",
         mesh_prim_paths = ["/map_mesh"],
-        max_distance = 6.0,
+        max_distance = 4.0,
         depth_clipping_behavior = "max",
         data_type = "distance_to_image_plane",
         update_period = 0.0,
