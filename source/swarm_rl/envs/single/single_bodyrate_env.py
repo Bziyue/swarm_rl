@@ -984,9 +984,15 @@ class QuadcopterEnv(DirectRLEnv):
         critic_obs = self.CHECK_NAN(critic_obs)
         self.CHECK_state()
 
+        # Critic auxiliary inputs for SRU value model
+        # - height: use front camera depth as a privileged 2D structural map
+        # - time: normalized episode progress in [0, 1]
+        height_obs = image_raw[:, 0:1, :, :]
+        time_obs = (self.episode_length_buf.float().unsqueeze(-1) / float(self.max_episode_length)).clamp(0.0, 1.0)
+
         return {
             "policy": {"image": image_noised, "state": policy_obs},
-            "critic": {"image": image_raw,    "state": critic_obs},
+            "critic": {"image": image_raw,    "state": critic_obs, "height": height_obs, "time": time_obs},
         }
 
 

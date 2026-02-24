@@ -304,6 +304,10 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
         "image": gym.spaces.Box(low=-float("inf"), high=float("inf"), shape=(camera_num, image_height, image_width), dtype="float32"),
         # 29 = 3 (gyro) + 9 (rot) + 3 (goal) + 1 (speed) + 4 (actions) + 3 (vel) + 3 (goal_dir) + 3 (obstacle_pos)
         "state": gym.spaces.Box(low=-float("inf"), high=float("inf"), shape=(26,), dtype="float32"),
+        # Critic-only height map branch (single channel)
+        "height": gym.spaces.Box(low=-float("inf"), high=float("inf"), shape=(1, image_height, image_width), dtype="float32"),
+        # Critic-only normalized episode progress [0, 1]
+        "time": gym.spaces.Box(low=0.0, high=1.0, shape=(1,), dtype="float32"),
     }
 
     # ========================================================================
